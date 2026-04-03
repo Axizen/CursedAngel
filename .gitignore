@@ -78,3 +78,7 @@ DerivedDataCache/*
 Plugins/sapient-unreal/Logs/SapientPrompts_2025-07-01.log
 Plugins/sapient-unreal/
 /CursedAngel/Binaries/Win64
+/CursedAngel/Saved
+/CursedAngel/Plugins
+/CursedAngel/Intermediate
+/CursedAngel/DerivedDataCache
