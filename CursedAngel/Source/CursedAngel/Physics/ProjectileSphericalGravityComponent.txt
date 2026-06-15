@@ -1,0 +1,87 @@
+// Copyright Axizen. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "ProjectileSphericalGravityComponent.generated.h"
+
+/**
+ * UProjectileSphericalGravityComponent
+ * Adds spherical gravity to any projectile (bullets, rockets, etc).
+ * - Works with native/projectile movement; disables world gravity by default.
+ * - Can inherit spawn orientation from owning pawn/NPC for curved/projected shots.
+ */
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class CURSEDANGEL_API UProjectileSphericalGravityComponent : public UActorComponent
+{
+    GENERATED_BODY()
+
+public:
+    UProjectileSphericalGravityComponent();
+
+    /** Gravity "planet center" (spherical/or custom gravity) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Projectile Gravity")
+    FVector PlanetCenter = FVector::ZeroVector;
+
+    /** Gravity in cm/s^2 */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Projectile Gravity")
+    float GravityStrength = 980.f;
+
+protected:
+    virtual void BeginPlay() override;
+    virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+};
+
+// Copyright Axizen. All Rights Reserved.
+
+#include "ProjectileSphericalGravityComponent.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/ProjectileMovementComponent.h"
+#include "Components/PrimitiveComponent.h"
+
+UProjectileSphericalGravityComponent::UProjectileSphericalGravityComponent()
+{
+    PrimaryComponentTick.bCanEverTick = true;
+}
+
+void UProjectileSphericalGravityComponent::BeginPlay()
+{
+    Super::BeginPlay();
+    AActor* Owner = GetOwner();
+    if (Owner)
+    {
+        // Disable world/projectile gravity so we only apply our custom force
+        if (UProjectileMovementComponent* Move = Owner->FindComponentByClass<UProjectileMovementComponent>())
+            Move->ProjectileGravityScale = 0.f;
+    }
+}
+
+void UProjectileSphericalGravityComponent::TickComponent(float DeltaTime, ELevelTick, FActorComponentTickFunction*)
+{
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
+
+    FVector GravityDir = (PlanetCenter - Owner->GetActorLocation()).GetSafeNormal();
+    FVector Gravity = GravityDir * GravityStrength;
+
+    // If uses ProjectileMovementComponent, apply manual acceleration
+    if (UProjectileMovementComponent* Move = Owner->FindComponentByClass<UProjectileMovementComponent>())
+    {
+        Move->Velocity += Gravity * DeltaTime;
+    }
+    else if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+    {
+        Root->AddForce(Gravity * Root->GetMass());
+    }
+}
+
+Usage for Designers & Programmers
+Designers:
+
+Simply add the component to pawns or projectiles in BP, set planet center & strength visually, enable boots as needed.
+For "gravity boots" levels, place gravity boots surfaces (e.g. using a custom surface/volume actor for boots mode).
+Programmers:
+
+Extend as needed for wall-detection, magnetic paths, advanced boots, or multi-planet systems.
+For weapons/projectiles: on spawn, set PlanetCenter/GravityStrength to match the firing pawn (or local zone), and use Pawn up/forward vector for muzzle orientation on boots.

@@ -186,6 +186,7 @@ void UCurseWeaponComponent::FireCurseWeapon()
         if (SpawnLocations.Num() > 0)
         {
             OnWeaponFired(CurrentWeapon, SpawnLocations[0], SpawnDirections[0]);
+            OnWeaponFiredDelegate.Broadcast(CurrentWeapon, SpawnLocations[0], SpawnDirections[0]);
         }
     }
 }
@@ -209,6 +210,7 @@ void UCurseWeaponComponent::SwitchWeapon(ECurseWeaponType NewWeapon)
         {
             CurrentWeapon = NewWeapon;
             OnWeaponSwitched(NewWeapon);
+            OnWeaponSwitchedDelegate.Broadcast(NewWeapon);
         }
     }
 }

@@ -8,7 +8,7 @@ public class CursedAngel : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "AIModule", "GameplayTasks", "NavigationSystem", "Niagara", "UMG", "Slate", "SlateCore", "GeometryCollectionEngine", "ChaosSolverEngine", "FieldSystemEngine", "GameplayTags" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "AIModule", "GameplayTasks", "NavigationSystem", "Niagara", "UMG", "Slate", "SlateCore", "GeometryCollectionEngine", "ChaosSolverEngine", "FieldSystemEngine", "GameplayTags", "RHI", "Renderer" });
 
         PrivateIncludePaths.AddRange(new string[] {
             "CursedAngel/",

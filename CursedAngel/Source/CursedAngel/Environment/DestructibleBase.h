@@ -7,6 +7,7 @@
 #include "NiagaraSystem.h"
 #include "GeometryCollection/GeometryCollectionObject.h"
 #include "Chaos/ClusterCreationParameters.h"
+#include "Engine/StaticMeshActor.h"
 
 
 // Forward declarations
@@ -229,3 +230,143 @@ public:
 	// FUTURE: Add destructible regeneration (objects respawn after time for replayability)
 	// FUTURE: Add environmental hazards on destruction (fire, electric sparks, toxic gas)
 };
+
+/**
+* UENUM(BlueprintType)
+enum class EChunkWaterInteraction : uint8
+{
+	Sink UMETA(DisplayName = "Sink"),
+	Float UMETA(DisplayName = "Float"),
+	Splash UMETA(DisplayName = "Splash"),
+	None UMETA(DisplayName = "No Interaction")
+};
+
+UCLASS()
+class CURSEDANGEL_API ADestructibleBase : public AActor
+{
+	GENERATED_BODY()
+
+public:
+
+	ADestructibleBase();
+
+	// ========================================================================
+	// HEALTH SYSTEM
+	// ========================================================================
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Health")
+	float Health = 100.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Health")
+	float MaxHealth = 100.0f;
+
+	// ========================================================================
+	// MESH COMPONENTS
+	// ========================================================================
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Destructible|Mesh")
+	class UStaticMeshComponent* IntactMeshComponent;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks",
+		meta = (Tooltip = "Pre-fractured mesh pieces (create in Blender with Fracture add-on)"))
+	TArray<UStaticMesh*> ChunkMeshes;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks",
+		meta = (ClampMin = "1", ClampMax = "50",
+		Tooltip = "Number of chunks to spawn (consider performance)"))
+	int32 ChunkCount = 5;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks",
+		meta = (UIMin = "0", UIMax = "5000", ClampMin = "0", ClampMax = "20000",
+		Tooltip = "Explosion impulse (Newtons). 500=normal, 2000=dramatic"))
+	float ChunkImpulseStrength = 1000.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks",
+		meta = (UIMin = "0.5", UIMax = "10", ClampMin = "0",
+		Tooltip = "How long chunks stay before despawn (seconds)"))
+	float ChunkLifetime = 3.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks|Physics",
+		meta = (UIMin = "0.1", UIMax = "5", ClampMin = "0.01",
+		Tooltip = "Chunk mass multiplier (1=default, 2=heavy, 0.5=light)"))
+	float ChunkMassMultiplier = 1.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks|Physics",
+		meta = (UIMin = "0", UIMax = "3000", ClampMin = "0",
+		Tooltip = "Angular velocity (spin) of chunks (rad/sec)"))
+	float ChunkSpinStrength = 500.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks|Physics",
+		meta = (UIMin = "0.1", UIMax = "3", ClampMin = "0.01",
+		Tooltip = "Wind resistance (1=normal, 0.5=heavy, 2=light)"))
+	float ChunkWindResistance = 1.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks|Water",
+		meta = (UIMin = "0", UIMax = "2", ClampMin = "0",
+		Tooltip = "Buoyancy in water (1=floats, 0=sinks)"))
+	float ChunkBuoyancy = 0.5f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Chunks|Water",
+		meta = (UIMin = "0.5", UIMax = "3", ClampMin = "0.1",
+		Tooltip = "Water resistance (1=normal, 2=thick water)"))
+	float ChunkWaterDrag = 1.0f;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Feedback",
+		meta = (Tooltip = "Particle system following chunks (optional)"))
+	class UNiagaraSystem* ChunkTrailParticles;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Feedback",
+		meta = (Tooltip = "Particle effect when chunk impacts (optional)"))
+	class UNiagaraSystem* ImpactParticles;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Feedback",
+		meta = (Tooltip = "Sound when chunk impacts (optional)"))
+	class USoundBase* ImpactSound;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Feedback",
+		meta = (Tooltip = "Explosion effect when destroyed (optional)"))
+	class UNiagaraSystem* DestructionVFX;
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Feedback",
+		meta = (Tooltip = "Explosion sound when destroyed (optional)"))
+	class USoundBase* DestructionSFX;
+
+		UFUNCTION(BlueprintCallable, Category = "Destructible",
+		meta = (Tooltip = "Apply damage to destructible"))
+	virtual void TakeDamageCustom(float DamageAmount, AActor* DamageCauser);
+
+		UFUNCTION(BlueprintCallable, Category = "Destructible",
+		meta = (Tooltip = "Destroy object and spawn chunks"))
+	virtual void DestroyObject();
+
+protected:
+
+	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaTime) override;
+
+		UFUNCTION(BlueprintCallable, Category = "Destructible")
+	void SpawnChunks();
+
+		UFUNCTION(BlueprintCallable, Category = "Destructible")
+	ADestructibleChunkActor* SpawnSingleChunk();
+
+		UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Rewards",
+		meta = (ClampMin = "0",
+		Tooltip = "Data currency to drop on destruction"))
+	int32 DataDropAmount = 10;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Rewards",
+		meta = (Tooltip = "Auto-collect data within radius (no pickup spawned)"))
+	bool bAutoCollectData = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destructible|Rewards",
+		meta = (UIMin = "0", UIMax = "1000", ClampMin = "0",
+		Tooltip = "Radius for auto-collection (cm)"))
+	float AutoCollectRadius = 200.0f;
+
+		UPROPERTY()
+	class UStaticMeshComponent* IntactMesh;
+
+	UPROPERTY()
+	TArray<ADestructibleChunkActor*> ActiveChunks;
+*/

@@ -1,0 +1,171 @@
+// Copyright Axizen. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "SphericalGravityComponent.generated.h"
+
+/**
+ * USphericalGravityComponent
+ * Pawn/character/NPC gravity and orientation for spherical/irregular surfaces and 'gravity boot' behavior.
+ * - Attach to player or enemy Pawn/Character.
+ * - Detects surfaces, orients actor, and applies custom gravity force.
+ * - Handles "gravity boot" mode (stick to wall) and reverts to world gravity when off a surface.
+ */
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class CURSEDANGEL_API USphericalGravityComponent : public UActorComponent
+{
+    GENERATED_BODY()
+public:
+    USphericalGravityComponent();
+
+    /** Spherical gravity world center (planet core or custom gravity source) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Tuning")
+    FVector PlanetCenter = FVector::ZeroVector;
+
+    /** Gravity acceleration in cm/s^2 (Earth = 980) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Tuning")
+    float GravityStrength = 980.f;
+
+    /** Line trace range to check for walkable/boots surfaces */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Tuning")
+    float SurfaceDetectRange = 75.f;
+
+    /** Should actor stick and align to walkable/boots surfaces (enable gravity boots) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Boots")
+    bool bGravityBootsEnabled = true;
+
+    /** Stick force applied to actor when boots engaged */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Boots")
+    float StickForce = 30000.f;
+
+    /** Alignment interp speed (for smoothing up-rotation) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Gravity Boots")
+    float AlignmentInterpSpeed = 8.0f;
+
+    /** [Readonly] True if currently anchored on a gravity boots surface */
+    UPROPERTY(BlueprintReadOnly, Category="Gravity Boots")
+    bool bOnGravitySurface = false;
+
+    /** The actor's current "up" (for aligning, public for Blueprint queries) */
+    UPROPERTY(BlueprintReadOnly, Category="Gravity Boots")
+    FVector SurfaceNormal = FVector::UpVector;
+
+protected:
+    virtual void BeginPlay() override;
+    virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+    /** Internal: raycast down to detect surface below Actor */
+    bool DetectGravitySurface(FVector& OutSurfaceNormal);
+
+    /** Handle transition to and from GravityBoots state */
+    void HandleGravityBoots(bool bWearingBoots, const FVector& DetectedNormal);
+
+// Copyright Axizen. All Rights Reserved.
+
+#include "SphericalGravityComponent.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "DrawDebugHelpers.h"
+
+USphericalGravityComponent::USphericalGravityComponent()
+{
+    PrimaryComponentTick.bCanEverTick = true;
+}
+
+void USphericalGravityComponent::BeginPlay()
+{
+    Super::BeginPlay();
+}
+
+void USphericalGravityComponent::TickComponent(float DeltaTime, ELevelTick, FActorComponentTickFunction*)
+{
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
+
+    FVector GravityDir = (PlanetCenter - Owner->GetActorLocation()).GetSafeNormal(); // Always valid
+    FVector SurfaceHitNormal = GravityDir; // Fallback normal if not grounded
+
+    bool bFoundSurface = false;
+
+    if (bGravityBootsEnabled)
+    {
+        // Surface detection: trace down for boots-eligible surface
+        bFoundSurface = DetectGravitySurface(SurfaceHitNormal);
+
+        bOnGravitySurface = bFoundSurface;
+        SurfaceNormal = (bFoundSurface ? SurfaceHitNormal : -GravityDir);
+
+        // For walking/sticking while on surface
+        if (bOnGravitySurface)
+        {
+            if (ACharacter* Char = Cast<ACharacter>(Owner))
+            {
+                if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+                {
+                    Move->GravityScale = 0.f; // Block default gravity
+                    // Stick to wall/floor with configurable force
+                    Move->AddForce(-SurfaceNormal * StickForce * Move->Mass);
+                }
+            }
+            // Smoothly orient up with detected surface
+            FRotator CurrentRot = Owner->GetActorRotation();
+            FRotator TargetRot = FRotationMatrix::MakeFromZX(SurfaceNormal, Owner->GetActorForwardVector()).Rotator();
+            FRotator NewRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaTime, AlignmentInterpSpeed);
+            Owner->SetActorRotation(NewRot);
+        }
+        else // Not on boots surface: revert to default orientation and custom gravity
+        {
+            if (ACharacter* Char = Cast<ACharacter>(Owner))
+            {
+                if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+                    Move->GravityScale = 1.f; // Use world gravity (can also call GravityDir for fancy planets)
+            }
+            // Optionally: interpolate back to upright
+        }
+    }
+
+    // Always apply custom gravity so you can do spherical/asteroid worlds, etc
+    if (ACharacter* Char = Cast<ACharacter>(Owner))
+    {
+        if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+        {
+            Move->AddForce(GravityDir * GravityStrength * Move->Mass);
+        }
+    }
+    else if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(Owner->GetRootComponent()))
+    {
+        Root->AddForce(GravityDir * GravityStrength * Root->GetMass());
+    }
+}
+
+bool USphericalGravityComponent::DetectGravitySurface(FVector& OutSurfaceNormal)
+{
+    const AActor* Owner = GetOwner();
+    if (!Owner) return false;
+
+    FVector Start = Owner->GetActorLocation();
+    FVector Down = -Owner->GetActorUpVector();
+    FVector End = Start + Down * SurfaceDetectRange;
+
+    FHitResult Hit;
+    FCollisionQueryParams Params;
+    Params.AddIgnoredActor(Owner);
+
+    bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+
+#if WITH_EDITOR
+    DrawDebugLine(GetWorld(), Start, End, bHit ? FColor::Green : FColor::Red, false, 0.04f, 0, 2.0f);
+#endif
+
+    if (bHit)
+    {
+        OutSurfaceNormal = Hit.Normal;
+        return true;
+    }
+    return false;
+}
+};

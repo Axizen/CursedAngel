@@ -24,8 +24,20 @@ enum class ECharacterRole : uint8
 };
 
 /**
- * Data asset containing character configuration including stats, weapons, moveset, and AI behavior
- * Used for data-driven character initialization (Ripley, Frank, etc.)
+ * Data asset containing character configuration including stats, weapons, moveset, and AI behavior.
+ * Used for data-driven character initialization (Ripley, Frank, etc.).
+ *
+ * Each character (Ripley, Frank) has their own instance of this asset, allowing independent
+ * tuning of movement feel, combat feel, and all base stats without touching C++ code.
+ *
+ * Feel configs:
+ *   - MovementFeel (FMovementFeelConfig): R&C-inspired platforming parameters (speed, jump, coyote time, etc.)
+ *   - CombatFeel (FCombatFeelConfig): DMC-inspired combat parameters (combo windows, hitstop, dash, dodge)
+ *
+ * Programmer: ApplyMovementFeelConfig() in ACursedAngelCharacter reads MovementFeel.
+ *             ActionComponent reads CombatFeel.ComboWindowDuration/ComboBufferExpiry.
+ *             Action_MeleeAttack reads CombatFeel.HitstopDuration/HitstopTimeDilation.
+ *             Action_AirDash/Action_Dodge read CombatFeel dash/dodge params.
  */
 UCLASS(BlueprintType)
 class CURSEDANGEL_API UCharacterDataAsset : public UPrimaryDataAsset
@@ -41,17 +53,36 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character Stats")
 	float MaxHealth = 100.0f;
 
-	/** Movement speed (units per second) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character Stats")
-	float MoveSpeed = 600.0f;
+	// ===========================
+	// Movement Feel (R&C Platforming)
+	// ===========================
 
-	/** Jump height (Z velocity) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character Stats")
-	float JumpHeight = 600.0f;
+	/** Designer-tunable platforming feel parameters. Each character (Ripley, Frank) has their own instance.
+	 *  These are the authoritative movement parameters for this character.
+	 *  Inspired by Ratchet & Clank responsive platforming: snappy ground movement, good air control,
+	 *  coyote time, variable jump height, and squash-on-landing polish.
+	 *
+	 *  Programmer: Applied via ACursedAngelCharacter::ApplyMovementFeelConfig(), called from
+	 *  InitializeFromDataAsset(). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement Feel",
+		meta = (Tooltip = "Full platforming feel config for this character."))
+	FMovementFeelConfig MovementFeel;
 
-	/** Number of air dashes available */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character Stats")
-	int32 AirDashCount = 1;
+	// ===========================
+	// Combat Feel (DMC Combat)
+	// ===========================
+
+	/** Designer-tunable combat responsiveness parameters. Each character has their own instance.
+	 *  Controls combo windows, hitstop freeze frames, air dash behavior, and dodge i-frame windows.
+	 *  Inspired by Devil May Cry snappy, satisfying combat feel.
+	 *
+	 *  Programmer: Read by ActionComponent (ComboWindowDuration/ComboBufferExpiry),
+	 *  ACursedAngelCharacter (DashSpeed/DashDuration/MaxAirDashes/DodgeSpeed/DodgeDuration),
+	 *  Action_MeleeAttack (HitstopDuration/HitstopTimeDilation/MeleeLaunchImpulse/AttackCancelWindow),
+	 *  Action_Dodge (DodgeIFrameStart/DodgeIFrameEnd), Action_AirDash (DashInputDirectionBlend). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat Feel",
+		meta = (Tooltip = "Full combat feel config. Controls combo windows, hitstop, dash, and dodge parameters."))
+	FCombatFeelConfig CombatFeel;
 
 	// ===========================
 	// Combat Stats

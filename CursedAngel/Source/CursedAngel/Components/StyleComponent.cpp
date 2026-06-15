@@ -117,6 +117,7 @@ void UStyleComponent::AddStylePoints(float Points)
 
 	// Fire Blueprint event
 	OnStylePointsChanged(CurrentStylePoints, CurrentRank);
+	OnStylePointsChangedDelegate.Broadcast(CurrentStylePoints, CurrentRank);
 }
 
 void UStyleComponent::OnEnemyKilled(AActor* Enemy, ECurseWeaponType Weapon, bool bEnvironmental)
@@ -139,6 +140,7 @@ void UStyleComponent::OnEnemyKilled(AActor* Enemy, ECurseWeaponType Weapon, bool
 	// Increment combo count
 	ComboCount++;
 	OnComboIncreased(ComboCount);
+	OnComboIncreasedDelegate.Broadcast(ComboCount);
 
 	// Track environmental kills
 	if (bEnvironmental)
@@ -232,6 +234,7 @@ void UStyleComponent::UpdateRank()
 	{
 		CurrentRank = NewRank;
 		OnRankChanged(NewRank, OldRank);
+		OnStyleRankChangedDelegate.Broadcast(NewRank, OldRank);
 	}
 }
 
@@ -272,6 +275,7 @@ void UStyleComponent::DecayStylePoints(float DeltaTime)
 
 			// Fire Blueprint event
 			OnStylePointsChanged(CurrentStylePoints, CurrentRank);
+			OnStylePointsChangedDelegate.Broadcast(CurrentStylePoints, CurrentRank);
 		}
 	}
 }
@@ -285,7 +289,9 @@ void UStyleComponent::ResetCombo()
 	
 	// Fire events
 	OnStylePointsChanged(CurrentStylePoints, CurrentRank);
+	OnStylePointsChangedDelegate.Broadcast(CurrentStylePoints, CurrentRank);
 	OnComboIncreased(ComboCount);
+	OnComboIncreasedDelegate.Broadcast(ComboCount);
 }
 
 float UStyleComponent::GetDamageMultiplier() const

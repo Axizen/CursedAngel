@@ -1,0 +1,1142 @@
+#include "Components/EnhancedSoftBodyPhysicsComponent.h"
+#include "ProceduralMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/PhysicsSettings.h"
+
+/**
+ * ============================================================================
+ * ENHANCED SOFTBODY PHYSICS IMPLEMENTATION
+ * ============================================================================
+ * 
+ * Real-time deformable mesh simulation with:
+ * - Verlet integration
+ * - Constraint-based deformation
+ * - Multi-body collision response
+ * - Tearing simulation
+ * 
+ * ============================================================================
+ */
+
+UEnhancedSoftBodyPhysicsComponent::UEnhancedSoftBodyPhysicsComponent()
+	: CurrentDeformation(0.0f)
+	, bSimulationPaused(false)
+	, TimeAccumulator(0.0f)
+{
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickInterval = 0.0f;
+
+	SetCollisionEnabled(ECC_WorldDynamic);
+	SetCollisionObjectType(ECC_WorldDynamic);
+	SetGenerateOverlapEvents(true);
+}
+
+void UEnhancedSoftBodyPhysicsComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Create procedural mesh component for rendering
+	if (!ProceduralMesh)
+	{
+		ProceduralMesh = NewObject<UProceduralMeshComponent>(this);
+		ProceduralMesh->RegisterComponent();
+		ProceduralMesh->AttachToComponent(this, FAttachmentTransformRules::KeepRelativeTransform);
+	}
+
+	// Initialize particles from source mesh
+	InitializeParticlesFromMesh();
+
+	// Initialize constraints from mesh connectivity
+	InitializeConstraints();
+
+	UE_LOG(LogTemp, Log, TEXT("SoftBody initialized with %d particles and %d constraints"),
+		Particles.Num(), Constraints.Num());
+}
+
+void UEnhancedSoftBodyPhysicsComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (bSimulationPaused || Particles.Num() == 0)
+	{
+		return;
+	}
+
+	// Accumulate time and step simulation with fixed timestep
+	TimeAccumulator += DeltaTime;
+	while (TimeAccumulator >= SimulationConfig.TimeStep)
+	{
+		SimulateFrame(SimulationConfig.TimeStep);
+		TimeAccumulator -= SimulationConfig.TimeStep;
+	}
+
+	// Update render mesh
+	UpdateRenderMesh();
+}
+
+void UEnhancedSoftBodyPhysicsComponent::InitializeParticlesFromMesh()
+{
+	if (!SourceMesh)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SoftBody: No source mesh set!"));
+		return;
+	}
+
+	Particles.Empty();
+
+	// Get static mesh vertices
+	FStaticMeshRenderData* RenderData = SourceMesh->GetRenderData();
+	if (!RenderData || RenderData->LODResources.Num() == 0)
+	{
+		return;
+	}
+
+	const FStaticMeshLODResources& LODResource = RenderData->LODResources[0];
+	const FPositionVertexBuffer& VertexBuffer = LODResource.VertexBuffers.PositionVertexBuffer;
+
+	OriginalVertexPositions.Empty(VertexBuffer.GetNumVertices());
+
+	for (uint32 i = 0; i < VertexBuffer.GetNumVertices(); ++i)
+	{
+		FVector VertexPos = FVector(VertexBuffer.VertexPosition(i));
+
+		// Convert to component space
+		VertexPos = GetComponentTransform().InverseTransformPosition(GetComponentLocation() + VertexPos);
+
+		FSoftBodyParticle Particle;
+		Particle.Position = VertexPos;
+		Particle.PreviousPosition = VertexPos;
+		Particle.Mass = 1.0f;
+
+		Particles.Add(Particle);
+		OriginalVertexPositions.Add(VertexPos);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SoftBody: Initialized %d particles from mesh"), Particles.Num());
+}
+
+void UEnhancedSoftBodyPhysicsComponent::InitializeConstraints()
+{
+	if (!SourceMesh)
+	{
+		return;
+	}
+
+	Constraints.Empty();
+
+	FStaticMeshRenderData* RenderData = SourceMesh->GetRenderData();
+	if (!RenderData || RenderData->LODResources.Num() == 0)
+	{
+		return;
+	}
+
+	const FStaticMeshLODResources& LODResource = RenderData->LODResources[0];
+	const FRawStaticIndexBuffer& IndexBuffer = LODResource.IndexBuffer;
+
+	// Create distance constraints from mesh edges
+	TSet<uint64> AddedEdges;
+
+	for (uint32 i = 0; i < IndexBuffer.GetNumIndices(); i += 3)
+	{
+		uint32 Idx0 = IndexBuffer.AccessIndex(i);
+		uint32 Idx1 = IndexBuffer.AccessIndex(i + 1);
+		uint32 Idx2 = IndexBuffer.AccessIndex(i + 2);
+
+		// Add three edges of triangle
+		for (int32 j = 0; j < 3; ++j)
+		{
+			uint32 A = (j == 0) ? Idx0 : (j == 1) ? Idx1 : Idx2;
+			uint32 B = (j == 0) ? Idx1 : (j == 1) ? Idx2 : Idx0;
+
+			if (A > B) Swap(A, B);
+
+			uint64 EdgeKey = ((uint64)A << 32) | B;
+
+			if (!AddedEdges.Contains(EdgeKey))
+			{
+				FSoftBodyConstraint Constraint;
+				Constraint.ParticleA = A;
+				Constraint.ParticleB = B;
+				Constraint.RestDistance = FVector::Dist(Particles[A].Position, Particles[B].Position);
+				Constraint.Stiffness = SimulationConfig.StretchingStiffness;
+				Constraint.ConstraintType = 0; // Distance
+				Constraint.bCanBreak = SimulationConfig.bEnableBreaking;
+
+				Constraints.Add(Constraint);
+				AddedEdges.Add(EdgeKey);
+			}
+		}
+
+		// Add bending constraints (edges across triangles)
+		// Simplified: store triangle for bend calculations
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SoftBody: Created %d constraints"), Constraints.Num());
+}
+
+void UEnhancedSoftBodyPhysicsComponent::SimulateFrame(float DeltaTime)
+{
+	// 1. Apply external forces
+	ApplyExternalForces(DeltaTime);
+
+	// 2. Integrate velocity (Verlet)
+	IntegrateVelocity(DeltaTime);
+
+	// 3. Solve constraints (multiple iterations for stability)
+	for (int32 i = 0; i < SimulationConfig.ConstraintIterations; ++i)
+	{
+		SolveConstraints();
+	}
+
+	// 4. Handle collisions
+	HandleCollisions();
+
+	// 5. Check for breaking
+	if (SimulationConfig.bEnableBreaking)
+	{
+		CheckConstraintBreaking();
+	}
+
+	// 6. Update normals
+	UpdateNormals();
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ApplyExternalForces(float DeltaTime)
+{
+	for (FSoftBodyParticle& Particle : Particles)
+	{
+		if (Particle.bPinned)
+		{
+			continue;
+		}
+
+		// Gravity
+		Particle.Force += SimulationConfig.Gravity;
+
+		// Wind
+		if (!SimulationConfig.WindVelocity.IsNearlyZero())
+		{
+			Particle.Force += SimulationConfig.WindVelocity * SimulationConfig.WindForce;
+		}
+
+		// Air resistance
+		FVector Velocity = Particle.Position - Particle.PreviousPosition;
+		Particle.Force -= Velocity * SimulationConfig.AirResistance;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::IntegrateVelocity(float DeltaTime)
+{
+	for (FSoftBodyParticle& Particle : Particles)
+	{
+		if (Particle.bPinned)
+		{
+			Particle.Force = FVector::ZeroVector;
+			continue;
+		}
+
+		// Verlet integration
+		FVector Acceleration = Particle.Force / Particle.Mass;
+		FVector NewPosition = Particle.Position + (Particle.Position - Particle.PreviousPosition) * Particle.Damping + Acceleration * (DeltaTime * DeltaTime);
+
+		Particle.Velocity = (NewPosition - Particle.Position) / DeltaTime;
+		Particle.PreviousPosition = Particle.Position;
+		Particle.Position = NewPosition;
+
+		// Reset force
+		Particle.Force = FVector::ZeroVector;
+	}
+
+	// Apply global damping
+	for (FSoftBodyParticle& Particle : Particles)
+	{
+		Particle.Velocity *= SimulationConfig.GlobalDamping;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::SolveConstraints()
+{
+	for (FSoftBodyConstraint& Constraint : Constraints)
+	{
+		if (Constraint.ConstraintType == 0) // Distance constraint
+		{
+			ConstrainDistance(Constraint);
+		}
+		else if (Constraint.ConstraintType == 1) // Bending constraint
+		{
+			ConstrainBending(Constraint);
+		}
+		else if (Constraint.ConstraintType == 2) // Volume constraint
+		{
+			ConstrainVolume(Constraint);
+		}
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ConstrainDistance(FSoftBodyConstraint& Constraint)
+{
+	FSoftBodyParticle& ParticleA = Particles[Constraint.ParticleA];
+	FSoftBodyParticle& ParticleB = Particles[Constraint.ParticleB];
+
+	FVector Delta = ParticleB.Position - ParticleA.Position;
+	float Distance = Delta.Length();
+	float Difference = (Distance - Constraint.RestDistance) / Distance;
+
+	// Only apply constraint with stiffness
+	FVector Correction = Delta * Difference * Constraint.Stiffness * 0.5f;
+
+	if (!ParticleA.bPinned)
+	{
+		ParticleA.Position += Correction;
+	}
+	if (!ParticleB.bPinned)
+	{
+		ParticleB.Position -= Correction;
+	}
+
+	// Track deformation
+	float Strain = FMath::Abs(Distance - Constraint.RestDistance) / Constraint.RestDistance;
+	CurrentDeformation = FMath::Max(CurrentDeformation, Strain);
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ConstrainBending(FSoftBodyConstraint& Constraint)
+{
+	// Simplified bending constraint
+	ConstrainDistance(Constraint);
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ConstrainVolume(FSoftBodyConstraint& Constraint)
+{
+	// Simplified volume constraint
+	ConstrainDistance(Constraint);
+}
+
+void UEnhancedSoftBodyPhysicsComponent::HandleCollisions()
+{
+	if (!SimulationConfig.bEnableRigidBodyCollision)
+	{
+		return;
+	}
+
+	ActiveCollisions.Empty();
+
+	// Check each particle for collisions
+	for (int32 i = 0; i < Particles.Num(); ++i)
+	{
+		FHitResult HitResult;
+		if (CheckParticleCollision(i, HitResult))
+		{
+			ResolveParticleCollision(i, HitResult);
+		}
+	}
+
+	// Self-collision detection
+	if (SimulationConfig.bEnableSelfCollision)
+	{
+		for (int32 i = 0; i < Particles.Num(); ++i)
+		{
+			for (int32 j = i + 1; j < Particles.Num(); ++j)
+			{
+				float Distance = FVector::Dist(Particles[i].Position, Particles[j].Position);
+				if (Distance < SimulationConfig.SelfCollisionMargin)
+				{
+					ResolveParticleParticleCollision(i, j);
+				}
+			}
+		}
+	}
+}
+
+bool UEnhancedSoftBodyPhysicsComponent::CheckParticleCollision(int32 ParticleIndex, FHitResult& OutHit)
+{
+	const FSoftBodyParticle& Particle = Particles[ParticleIndex];
+
+	FVector TraceStart = Particle.PreviousPosition;
+	FVector TraceEnd = Particle.Position;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(GetOwner());
+
+	return GetWorld()->LineTraceSingleByChannel(OutHit, TraceStart, TraceEnd, ECC_WorldDynamic, QueryParams);
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ResolveParticleCollision(int32 ParticleIndex, const FHitResult& Hit)
+{
+	FSoftBodyParticle& Particle = Particles[ParticleIndex];
+
+	// Push particle out of collision
+	FVector Normal = Hit.ImpactNormal;
+	Particle.Position = Hit.ImpactPoint + Normal * 1.0f;
+
+	// Apply collision response (bounce)
+	FVector Velocity = Particle.Position - Particle.PreviousPosition;
+	FVector ResponseVelocity = Velocity.Reflect(Normal) * SimulationConfig.CollisionResponse;
+
+	Particle.PreviousPosition = Particle.Position - ResponseVelocity;
+
+	// Record collision
+	FSoftBodyCollisionPair Collision;
+	Collision.ParticleIndex = ParticleIndex;
+	Collision.OtherActor = Hit.GetActor();
+	Collision.ContactPoint = Hit.ImpactPoint;
+	Collision.ContactNormal = Normal;
+	Collision.PenetrationDepth = (Particle.Position - Hit.ImpactPoint).Length();
+
+	ActiveCollisions.Add(Collision);
+
+	// Fire collision event
+	OnParticleCollision.Broadcast(ParticleIndex, Hit.GetActor());
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ResolveParticleParticleCollision(int32 ParticleA, int32 ParticleB)
+{
+	FSoftBodyParticle& PtclA = Particles[ParticleA];
+	FSoftBodyParticle& PtclB = Particles[ParticleB];
+
+	FVector Delta = PtclB.Position - PtclA.Position;
+	float Distance = Delta.Length();
+
+	if (Distance < KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	FVector Normal = Delta.GetSafeNormal();
+	float Overlap = SimulationConfig.SelfCollisionMargin - Distance;
+
+	// Separate particles
+	FVector Separation = Normal * Overlap * 0.5f;
+
+	if (!PtclA.bPinned)
+	{
+		PtclA.Position -= Separation;
+	}
+	if (!PtclB.bPinned)
+	{
+		PtclB.Position += Separation;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::CheckConstraintBreaking()
+{
+	for (int32 i = Constraints.Num() - 1; i >= 0; --i)
+	{
+		FSoftBodyConstraint& Constraint = Constraints[i];
+
+		if (!Constraint.bCanBreak)
+		{
+			continue;
+		}
+
+		float Distance = FVector::Dist(Particles[Constraint.ParticleA].Position, Particles[Constraint.ParticleB].Position);
+		float Strain = Distance / Constraint.RestDistance;
+
+		if (Strain > Constraint.BreakThreshold)
+		{
+			OnConstraintBreak.Broadcast(i, Strain, Constraint.BreakThreshold);
+			Constraints.RemoveAt(i);
+		}
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::UpdateNormals()
+{
+	// Simplified normal calculation
+	// Would normally use mesh topology for accurate normals
+}
+
+void UEnhancedSoftBodyPhysicsComponent::UpdateRenderMesh()
+{
+	if (!ProceduralMesh || Particles.Num() == 0)
+	{
+		return;
+	}
+
+	// Update procedural mesh with deformed vertex positions
+	TArray<FVector> Vertices;
+	TArray<FVector> Normals;
+	TArray<int32> Triangles;
+	TArray<FVector2D> UV0;
+	TArray<FLinearColor> VertexColors;
+	TArray<FProcMeshTangent> Tangents;
+
+	for (const FSoftBodyParticle& Particle : Particles)
+	{
+		Vertices.Add(Particle.Position);
+	}
+
+	// TODO: Copy triangle indices from source mesh
+
+	ProceduralMesh->CreateMeshSection_LinearColor(
+		0,
+		Vertices,
+		Triangles,
+		Normals,
+		UV0,
+		VertexColors,
+		Tangents,
+		true);
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+FVector UEnhancedSoftBodyPhysicsComponent::GetParticlePosition(int32 ParticleIndex) const
+{
+	if (Particles.IsValidIndex(ParticleIndex))
+	{
+		return Particles[ParticleIndex].Position;
+	}
+	return FVector::ZeroVector;
+}
+
+void UEnhancedSoftBodyPhysicsComponent::SetParticlePosition(int32 ParticleIndex, const FVector& NewPosition)
+{
+	if (Particles.IsValidIndex(ParticleIndex))
+	{
+		Particles[ParticleIndex].Position = NewPosition;
+		Particles[ParticleIndex].PreviousPosition = NewPosition;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::PinParticle(int32 ParticleIndex, bool bPinned)
+{
+	if (Particles.IsValidIndex(ParticleIndex))
+	{
+		Particles[ParticleIndex].bPinned = bPinned;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::AddForceToParticle(int32 ParticleIndex, const FVector& Force)
+{
+	if (Particles.IsValidIndex(ParticleIndex))
+	{
+		Particles[ParticleIndex].Force += Force;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::AddForceToAll(const FVector& Force)
+{
+	for (FSoftBodyParticle& Particle : Particles)
+	{
+		Particle.Force += Force;
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ApplyCollisionResponse(const FHitResult& Hit)
+{
+	// Find nearest particle to collision point
+	float NearestDistance = FLT_MAX;
+	int32 NearestParticleIndex = -1;
+
+	for (int32 i = 0; i < Particles.Num(); ++i)
+	{
+		float Distance = FVector::Dist(Particles[i].Position, Hit.ImpactPoint);
+		if (Distance < NearestDistance)
+		{
+			NearestDistance = Distance;
+			NearestParticleIndex = i;
+		}
+	}
+
+	if (NearestParticleIndex >= 0)
+	{
+		ResolveParticleCollision(NearestParticleIndex, Hit);
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ApplyImpact(const FVector& ImpactLocation, float ImpactForce, float ImpactRadius)
+{
+	for (int32 i = 0; i < Particles.Num(); ++i)
+	{
+		float Distance = FVector::Dist(Particles[i].Position, ImpactLocation);
+
+		if (Distance < ImpactRadius)
+		{
+			FVector Direction = (Particles[i].Position - ImpactLocation).GetSafeNormal();
+			float Falloff = 1.0f - (Distance / ImpactRadius);
+			FVector Force = Direction * ImpactForce * Falloff;
+
+			AddForceToParticle(i, Force);
+		}
+	}
+}
+
+void UEnhancedSoftBodyPhysicsComponent::ResetSimulation()
+{
+	for (int32 i = 0; i < Particles.Num(); ++i)
+	{
+		Particles[i].Position = OriginalVertexPositions[i];
+		Particles[i].PreviousPosition = OriginalVertexPositions[i];
+		Particles[i].Velocity = FVector::ZeroVector;
+		Particles[i].Force = FVector::ZeroVector;
+	}
+
+	CurrentDeformation = 0.0f;
+	ActiveCollisions.Empty();
+}
+
+void UEnhancedSoftBodyPhysicsComponent::SetSimulationPaused(bool bPaused)
+{
+	bSimulationPaused = bPaused;
+}
+
+void UEnhancedSoftBodyPhysicsComponent::SetWind(const FVector& WindVelocity, float WindForce)
+{
+	SimulationConfig.WindVelocity = WindVelocity;
+	SimulationConfig.WindForce = WindForce;
+}
+
+TArray<FVector> UEnhancedSoftBodyPhysicsComponent::GetDeformedVertexPositions() const
+{
+	TArray<FVector> Positions;
+	for (const FSoftBodyParticle& Particle : Particles)
+	{
+		Positions.Add(Particle.Position);
+	}
+	return Positions;
+}
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/PrimitiveComponent.h"
+#include "PhysicsEngine/PhysicsConstraintComponent.h"
+#include "EnhancedSoftBodyPhysicsComponent.generated.h"
+
+/**
+ * ============================================================================
+ * ENHANCED SOFTBODY PHYSICS COMPONENT FOR UE5
+ * ============================================================================
+ * 
+ * Advanced soft body simulation combining:
+ * 1. Particle-based dynamics (mass-spring systems)
+ * 2. Constraint satisfaction (distance, volume, bending constraints)
+ * 3. Collision detection (soft-soft, soft-rigid)
+ * 4. Deformation handling
+ * 
+ * Inspired by:
+ * - iMSTK (Interactive Medical Simulation Toolkit) PBD Model
+ * - PhysX Cloth simulation
+ * - Bullet Physics soft body implementation
+ * - FEM (Finite Element Method) deformation
+ * 
+ * Features:
+ * - Real-time mesh deformation
+ * - Multi-body collision handling
+ * - Tearing and breaking simulation
+ * - Wind and external forces
+ * - Self-collision detection
+ * 
+ * ============================================================================
+ */
+
+// Particle in the soft body mesh
+USTRUCT(BlueprintType)
+struct FSoftBodyParticle
+{
+	GENERATED_BODY()
+
+	/** Current position */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Particle")
+	FVector Position;
+
+	/** Previous position (for Verlet integration) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Particle")
+	FVector PreviousPosition;
+
+	/** Velocity (calculated from position difference) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Particle")
+	FVector Velocity;
+
+	/** Mass of particle */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Particle")
+	float Mass;
+
+	/** Accumulated forces applied this frame */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Particle")
+	FVector Force;
+
+	/** Is this particle pinned (fixed position)? */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Particle")
+	bool bPinned;
+
+	/** Damping coefficient (0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Particle", meta = (UIMin = "0", UIMax = "1"))
+	float Damping;
+
+	FSoftBodyParticle()
+		: Position(FVector::ZeroVector)
+		, PreviousPosition(FVector::ZeroVector)
+		, Velocity(FVector::ZeroVector)
+		, Mass(1.0f)
+		, Force(FVector::ZeroVector)
+		, bPinned(false)
+		, Damping(0.99f)
+	{
+	}
+};
+
+// Constraint between two particles
+USTRUCT(BlueprintType)
+struct FSoftBodyConstraint
+{
+	GENERATED_BODY()
+
+	/** Index of first particle */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint")
+	int32 ParticleA;
+
+	/** Index of second particle */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint")
+	int32 ParticleB;
+
+	/** Rest distance between particles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint")
+	float RestDistance;
+
+	/** Stiffness of constraint (0-1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint", meta = (UIMin = "0", UIMax = "1"))
+	float Stiffness;
+
+	/** Constraint type */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint")
+	uint8 ConstraintType; // 0=Distance, 1=Bend, 2=Volume, 3=Structural
+
+	/** Can this constraint break? */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint")
+	bool bCanBreak;
+
+	/** Threshold for breaking (as multiple of rest distance) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Constraint", meta = (UIMin = "1.0", UIMax = "5.0"))
+	float BreakThreshold;
+
+	FSoftBodyConstraint()
+		: ParticleA(0)
+		, ParticleB(0)
+		, RestDistance(1.0f)
+		, Stiffness(1.0f)
+		, ConstraintType(0)
+		, bCanBreak(false)
+		, BreakThreshold(2.0f)
+	{
+	}
+};
+
+// Collision pair for soft body
+USTRUCT(BlueprintType)
+struct FSoftBodyCollisionPair
+{
+	GENERATED_BODY()
+
+	/** Particle index in soft body */
+	UPROPERTY()
+	int32 ParticleIndex;
+
+	/** Other actor colliding with */
+	UPROPERTY()
+	AActor* OtherActor;
+
+	/** Contact point */
+	UPROPERTY()
+	FVector ContactPoint;
+
+	/** Contact normal */
+	UPROPERTY()
+	FVector ContactNormal;
+
+	/** Penetration depth */
+	UPROPERTY()
+	float PenetrationDepth;
+
+	FSoftBodyCollisionPair()
+		: ParticleIndex(0)
+		, OtherActor(nullptr)
+		, ContactPoint(FVector::ZeroVector)
+		, ContactNormal(FVector::ZeroVector)
+		, PenetrationDepth(0.0f)
+	{
+	}
+};
+
+/**
+ * SOFTBODY CONFIGURATION
+ */
+USTRUCT(BlueprintType)
+struct FSoftBodySimulationConfig
+{
+	GENERATED_BODY()
+
+	// ========================================================================
+	// SIMULATION PARAMETERS
+	// ========================================================================
+
+	/** Number of iterations per frame for constraint solving */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation", meta = (UIMin = "1", UIMax = "10"))
+	int32 ConstraintIterations;
+
+	/** Gravity applied to particles */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
+	FVector Gravity;
+
+	/** Time step for simulation */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
+	float TimeStep;
+
+	/** Global damping (energy loss per frame) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation", meta = (UIMin = "0", UIMax = "1"))
+	float GlobalDamping;
+
+	// ========================================================================
+	// STRUCTURAL PROPERTIES
+	// ========================================================================
+
+	/** Stretching constraint stiffness */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Structural", meta = (UIMin = "0", UIMax = "1"))
+	float StretchingStiffness;
+
+	/** Bending constraint stiffness */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Structural", meta = (UIMin = "0", UIMax = "1"))
+	float BendingStiffness;
+
+	/** Volume preservation stiffness */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Structural", meta = (UIMin = "0", UIMax = "1"))
+	float VolumeStiffness;
+
+	// ========================================================================
+	// COLLISION PROPERTIES
+	// ========================================================================
+
+	/** Enable self-collision detection */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision")
+	bool bEnableSelfCollision;
+
+	/** Margin for self-collision (in cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision")
+	float SelfCollisionMargin;
+
+	/** Enable collision with rigid bodies */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision")
+	bool bEnableRigidBodyCollision;
+
+	/** Collision response coefficient (0-1, how much to respond) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (UIMin = "0", UIMax = "1"))
+	float CollisionResponse;
+
+	/** Friction coefficient with other bodies */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (UIMin = "0", UIMax = "1"))
+	float CollisionFriction;
+
+	// ========================================================================
+	// WIND & EXTERNAL FORCES
+	// ========================================================================
+
+	/** Wind velocity */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForces")
+	FVector WindVelocity;
+
+	/** Wind force magnitude */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForces")
+	float WindForce;
+
+	/** Air resistance coefficient */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForces", meta = (UIMin = "0", UIMax = "1"))
+	float AirResistance;
+
+	// ========================================================================
+	// BREAKING & TEARING
+	// ========================================================================
+
+	/** Enable constraint breaking */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breaking")
+	bool bEnableBreaking;
+
+	/** Stress threshold for breaking */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Breaking")
+	float BreakStressThreshold;
+
+	FSoftBodySimulationConfig()
+		: ConstraintIterations(5)
+		, Gravity(0.0f, 0.0f, -980.0f)
+		, TimeStep(0.016f)
+		, GlobalDamping(0.99f)
+		, StretchingStiffness(0.95f)
+		, BendingStiffness(0.9f)
+		, VolumeStiffness(0.8f)
+		, bEnableSelfCollision(true)
+		, SelfCollisionMargin(2.0f)
+		, bEnableRigidBodyCollision(true)
+		, CollisionResponse(0.8f)
+		, CollisionFriction(0.5f)
+		, WindVelocity(FVector::ZeroVector)
+		, WindForce(0.0f)
+		, AirResistance(0.02f)
+		, bEnableBreaking(true)
+		, BreakStressThreshold(2.0f)
+	{
+	}
+};
+
+UCLASS(ClassGroup = (Physics), meta = (BlueprintSpawnableComponent))
+class CURSEDANGEL_API UEnhancedSoftBodyPhysicsComponent : public UPrimitiveComponent
+{
+	GENERATED_BODY()
+
+public:
+
+	UEnhancedSoftBodyPhysicsComponent();
+
+	virtual void BeginPlay() override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+	// ========================================================================
+	// CONFIGURATION
+	// ========================================================================
+
+	/** Softbody simulation configuration */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SoftBody")
+	FSoftBodySimulationConfig SimulationConfig;
+
+	/** Source mesh asset */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SoftBody")
+	class UStaticMesh* SourceMesh;
+
+	/** Material for rendering */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SoftBody")
+	class UMaterialInterface* SoftBodyMaterial;
+
+	// ========================================================================
+	// PARTICLE MANAGEMENT
+	// ========================================================================
+
+	/** All particles in the soft body */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SoftBody|Particles")
+	TArray<FSoftBodyParticle> Particles;
+
+	/** All constraints */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SoftBody|Particles")
+	TArray<FSoftBodyConstraint> Constraints;
+
+	/**
+	 * GET PARTICLE COUNT
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	int32 GetParticleCount() const { return Particles.Num(); }
+
+	/**
+	 * GET CONSTRAINT COUNT
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	int32 GetConstraintCount() const { return Constraints.Num(); }
+
+	/**
+	 * GET PARTICLE POSITION
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	FVector GetParticlePosition(int32 ParticleIndex) const;
+
+	/**
+	 * SET PARTICLE POSITION
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	void SetParticlePosition(int32 ParticleIndex, const FVector& NewPosition);
+
+	/**
+	 * PIN PARTICLE
+	 * Fix a particle in place
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	void PinParticle(int32 ParticleIndex, bool bPinned = true);
+
+	/**
+	 * ADD FORCE TO PARTICLE
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	void AddForceToParticle(int32 ParticleIndex, const FVector& Force);
+
+	/**
+	 * ADD FORCE TO ALL PARTICLES
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody")
+	void AddForceToAll(const FVector& Force);
+
+	// ========================================================================
+	// COLLISION & INTERACTION
+	// ========================================================================
+
+	/**
+	 * GET COLLISION PAIRS
+	 * All active collisions this frame
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Collision")
+	const TArray<FSoftBodyCollisionPair>& GetCollisionPairs() const { return ActiveCollisions; }
+
+	/**
+	 * GET COLLISION COUNT
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Collision")
+	int32 GetCollisionCount() const { return ActiveCollisions.Num(); }
+
+	/**
+	 * APPLY COLLISION RESPONSE
+	 * Called when colliding with another object
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Collision")
+	void ApplyCollisionResponse(const FHitResult& Hit);
+
+	/**
+	 * APPLY IMPACT
+	 * Create deformation from impact force
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Collision")
+	void ApplyImpact(const FVector& ImpactLocation, float ImpactForce, float ImpactRadius);
+
+	// ========================================================================
+	// SIMULATION CONTROL
+	// ========================================================================
+
+	/**
+	 * RESET SIMULATION
+	 * Return to initial state
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Simulation")
+	void ResetSimulation();
+
+	/**
+	 * SET SIMULATION PAUSED
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Simulation")
+	void SetSimulationPaused(bool bPaused);
+
+	/**
+	 * IS SIMULATION PAUSED
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Simulation")
+	bool IsSimulationPaused() const { return bSimulationPaused; }
+
+	/**
+	 * SET WIND
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|ExternalForces")
+	void SetWind(const FVector& WindVelocity, float WindForce);
+
+	/**
+	 * GET DEFORMATION
+	 * How much the mesh has deformed (0-1)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Simulation")
+	float GetDeformation() const { return CurrentDeformation; }
+
+	// ========================================================================
+	// MESH UPDATES
+	// ========================================================================
+
+	/**
+	 * GET DEFORMED VERTEX POSITIONS
+	 * For rendering or physics queries
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Mesh")
+	TArray<FVector> GetDeformedVertexPositions() const;
+
+	/**
+	 * UPDATE MESH
+	 * Apply vertex deformations to render mesh
+	 */
+	UFUNCTION(BlueprintCallable, Category = "SoftBody|Mesh")
+	void UpdateRenderMesh();
+
+	// ========================================================================
+	// DELEGATES
+	// ========================================================================
+
+	/** Called when particles collide */
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSoftBodyCollision, int32, ParticleIndex, AActor*, OtherActor);
+
+	/** Called when constraint breaks */
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_Three(FOnConstraintBreak, int32, ConstraintIndex, float, BreakForce, float, BreakThreshold);
+
+	UPROPERTY(BlueprintAssignable, Category = "SoftBody|Events")
+	FOnSoftBodyCollision OnParticleCollision;
+
+	UPROPERTY(BlueprintAssignable, Category = "SoftBody|Events")
+	FOnConstraintBreak OnConstraintBreak;
+
+protected:
+
+	/** Initialize particles from mesh */
+	void InitializeParticlesFromMesh();
+
+	/** Initialize constraints from mesh connectivity */
+	void InitializeConstraints();
+
+	/** Main simulation loop */
+	void SimulateFrame(float DeltaTime);
+
+	/** Apply external forces (gravity, wind) */
+	void ApplyExternalForces(float DeltaTime);
+
+	/** Verlet integration step */
+	void IntegrateVelocity(float DeltaTime);
+
+	/** Solve all constraints */
+	void SolveConstraints();
+
+	/** Check and resolve collisions */
+	void HandleCollisions();
+
+	/** Update mesh normals and render data */
+	void UpdateNormals();
+
+	/** Check for constraint breaking */
+	void CheckConstraintBreaking();
+
+	// ========================================================================
+	// INTERNAL STATE
+	// ========================================================================
+
+	UPROPERTY()
+	class UProceduralMeshComponent* ProceduralMesh;
+
+	/** Original mesh vertex positions */
+	UPROPERTY()
+	TArray<FVector> OriginalVertexPositions;
+
+	/** Current deformation amount */
+	UPROPERTY()
+	float CurrentDeformation;
+
+	/** Simulation paused? */
+	UPROPERTY()
+	bool bSimulationPaused;
+
+	/** Active collision pairs this frame */
+	UPROPERTY()
+	TArray<FSoftBodyCollisionPair> ActiveCollisions;
+
+	/** Time accumulator for fixed timestep */
+	UPROPERTY()
+	float TimeAccumulator;
+
+	// ========================================================================
+	// HELPERS
+	// ========================================================================
+
+	/** Calculate distance constraint between two particles */
+	void ConstrainDistance(FSoftBodyConstraint& Constraint);
+
+	/** Calculate bending constraint */
+	void ConstrainBending(FSoftBodyConstraint& Constraint);
+
+	/** Calculate volume constraint */
+	void ConstrainVolume(FSoftBodyConstraint& Constraint);
+
+	/** Check collision between particle and rigid body */
+	bool CheckParticleCollision(int32 ParticleIndex, FHitResult& OutHit);
+
+	/** Resolve particle-rigid body collision */
+	void ResolveParticleCollision(int32 ParticleIndex, const FHitResult& Hit);
+
+	/** Resolve particle-particle collision */
+	void ResolveParticleParticleCollision(int32 ParticleA, int32 ParticleB);
+};

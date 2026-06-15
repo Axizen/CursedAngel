@@ -9,6 +9,17 @@
 #include "Kismet/KismetMathLibrary.h"
 #include "DrawDebugHelpers.h"
 
+static TAutoConsoleVariable<int32> CVarAnimDebug(
+	TEXT("ca.AnimDebug"),
+	0,
+	TEXT("Enable CursedAngel anim instance debug logging (0=off, 1=on)"),
+	ECVF_Default
+);
+
+#define CA_ANIM_LOG(Fmt, ...) \
+	if (CVarAnimDebug.GetValueOnGameThread()) \
+		UE_LOG(LogTemp, Log, TEXT("[CAAnimDebug] " Fmt), ##__VA_ARGS__)
+
 UCursedAngelAnimInstance::UCursedAngelAnimInstance()
 {
 	// Initialize default values
@@ -36,16 +47,34 @@ void UCursedAngelAnimInstance::NativeInitializeAnimation()
 	// Cache owner character reference
 	OwnerCharacter = Cast<ACursedAngelCharacter>(TryGetPawnOwner());
 
-	if (OwnerCharacter)
+	if (NormalFormLayerClass)
 	{
-		// Initialize to normal form
-		SwitchToNormalForm();
+		// Call LinkAnimClassLayers directly — SwitchToNormalForm() early-returns
+		// when CurrentForm is already Normal (set in constructor), so we bypass it.
+		// LinkAnimClassLayers is the correct API for interface-based Linked Anim Layers (ALI_Ripley).
+		LinkAnimClassLayers(NormalFormLayerClass);
+		CA_ANIM_LOG("NativeInitializeAnimation: LinkAnimClassLayers called with %s (OwnerCharacter=%s)",
+			*NormalFormLayerClass->GetName(),
+			OwnerCharacter ? *OwnerCharacter->GetName() : TEXT("NULL"));
+	}
+	else
+	{
+		CA_ANIM_LOG("NativeInitializeAnimation: NormalFormLayerClass is NULL - layer NOT linked");
 	}
 }
 
 void UCursedAngelAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
+
+	if (!OwnerCharacter)
+	{
+		OwnerCharacter = Cast<ACursedAngelCharacter>(TryGetPawnOwner());
+		if (OwnerCharacter)
+		{
+			CA_ANIM_LOG("NativeUpdateAnimation: OwnerCharacter acquired lazily -> %s", *OwnerCharacter->GetName());
+		}
+	}
 
 	if (OwnerCharacter)
 	{
@@ -55,19 +84,13 @@ void UCursedAngelAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 void UCursedAngelAnimInstance::SwitchToNormalForm()
 {
-	// Already in normal form
-	if (CurrentForm == EAnimationForm::Normal)
-	{
-		return;
-	}
-
-	// Set current form
+	// Set current form (no early-return — allow re-linking on explicit calls)
 	CurrentForm = EAnimationForm::Normal;
 
-	// Link normal form layer class if valid
+	// Link normal form layer class using the correct interface-based API
 	if (NormalFormLayerClass)
 	{
-		LinkAnimationLayer(NormalFormLayerClass, FName("FullBodySlot"));
+		LinkAnimClassLayers(NormalFormLayerClass);
 	}
 
 	// Swap mesh to normal form
@@ -81,19 +104,13 @@ void UCursedAngelAnimInstance::SwitchToNormalForm()
 
 void UCursedAngelAnimInstance::SwitchToCursedAngelForm()
 {
-	// Already in cursed angel form
-	if (CurrentForm == EAnimationForm::CursedAngel)
-	{
-		return;
-	}
-
-	// Set current form
+	// Set current form (no early-return — allow re-linking on explicit calls)
 	CurrentForm = EAnimationForm::CursedAngel;
 
-	// Link cursed angel form layer class if valid
+	// Link cursed angel form layer class using the correct interface-based API
 	if (CursedAngelFormLayerClass)
 	{
-		LinkAnimationLayer(CursedAngelFormLayerClass, FName("FullBodySlot"));
+		LinkAnimClassLayers(CursedAngelFormLayerClass);
 	}
 
 	// Swap mesh to cursed angel form

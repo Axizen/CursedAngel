@@ -4,42 +4,43 @@
 
 #include "CoreMinimal.h"
 #include "CursedAngelCharacter.h"
+#include "Physics/SoftBodyPhysicsComponent.h"
 #include "Ripley.generated.h"
 
 // Forward declarations
-class UAirDashComponent;
 // TODO: Create these components in future steps
 // class UDataManagerComponent;
 // class UWeaponManagerComponent;
 // class UBlessedModManagerComponent;
 class UHairPhysicsComponent;
 class UClothPhysicsComponent;
-class USoftBodyPhysicsComponent;
 
 /**
  * ARipley - Ranged combat specialist character
- * 
+ *
  * Inherits from ACursedAngelCharacter to gain:
  * - Camera system
  * - Input system
  * - Combat components (CurseWeaponComponent, CursedAngelComponent, StyleComponent)
  * - Base combat functions
- * 
+ * - Air dash, coyote time, and variable jump (now fully implemented in base class)
+ *
  * Adds Ripley-specific features:
- * - Air dash mobility
+ * - Transformation movement modifiers (speed/jump multipliers during Cursed Angel mode)
  * - Weapon management system
  * - Blessed mod system
  * - Advanced physics (hair, cloth, soft body)
  * - Ranged combat focus (70% ranged, 30% melee)
+ *
+ * Programmer: Air dash is no longer a separate component — it lives in ACursedAngelCharacter.
+ * ApplyTransformationMovementModifiers() now uses the MovementFeel config from CharacterDataAsset
+ * as the base for multiplier calculations. RevertTransformationMovementModifiers() calls
+ * ApplyMovementFeelConfig() for a clean data-asset-driven restore.
  */
 UCLASS(config=Game)
 class ARipley : public ACursedAngelCharacter
 {
 	GENERATED_BODY()
-
-	/** Air Dash Component - Ripley's signature mobility ability */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Movement, meta = (AllowPrivateAccess = "true"))
-	UAirDashComponent* AirDashComponent;
 
 	// TODO: Add these components in future steps
 	// /** Data Manager Component - Manages persistent player data */
@@ -65,6 +66,30 @@ class ARipley : public ACursedAngelCharacter
 	/** Soft Body Physics Component - Advanced soft body simulation */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = Physics, meta = (AllowPrivateAccess = "true"))
 	USoftBodyPhysicsComponent* SoftBodyPhysicsComponent;
+
+	/** Soft Body - Left breast simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_BreastL;
+
+	/** Soft Body - Right breast simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_BreastR;
+
+	/** Soft Body - Left thigh simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_ThighL;
+
+	/** Soft Body - Right thigh simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_ThighR;
+
+	/** Soft Body - Left butt simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_ButtL;
+
+	/** Soft Body - Right butt simulation */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Physics|Soft Body", meta = (AllowPrivateAccess = "true"))
+	USoftBodyPhysicsComponent* SoftBody_ButtR;
 
 
 public:
@@ -95,18 +120,23 @@ public:
 private:
 	/** Stored original movement values */
 	float OriginalMaxWalkSpeed;
-	float OriginalJumpZVelocity;
+	float OriginalJumpHeight;
 	float OriginalAirControl;
 	float OriginalCameraFOV;
 
 public:
 	/** Ripley-specific component getters */
-	FORCEINLINE class UAirDashComponent* GetAirDashComponent() const { return AirDashComponent; }
 	// TODO: Add getters for these components in future steps
 	// FORCEINLINE class UDataManagerComponent* GetDataManagerComponent() const { return DataManagerComponent; }
 	// FORCEINLINE class UWeaponManagerComponent* GetWeaponManagerComponent() const { return WeaponManagerComponent; }
 	// FORCEINLINE class UBlessedModManagerComponent* GetBlessedModManagerComponent() const { return BlessedModManagerComponent; }
 	FORCEINLINE class UHairPhysicsComponent* GetHairPhysicsComponent() const { return HairPhysicsComponent; }
 	FORCEINLINE class UClothPhysicsComponent* GetClothPhysicsComponent() const { return ClothPhysicsComponent; }
-	FORCEINLINE class USoftBodyPhysicsComponent* GetSoftBodyPhysicsComponent() const { return SoftBodyPhysicsComponent; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBodyPhysicsComponent() const { return SoftBodyPhysicsComponent; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_BreastL() const { return SoftBody_BreastL; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_BreastR() const { return SoftBody_BreastR; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_ThighL() const { return SoftBody_ThighL; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_ThighR() const { return SoftBody_ThighR; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_ButtL() const { return SoftBody_ButtL; }
+	FORCEINLINE USoftBodyPhysicsComponent* GetSoftBody_ButtR() const { return SoftBody_ButtR; }
 };

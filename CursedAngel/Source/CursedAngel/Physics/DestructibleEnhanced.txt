@@ -1,0 +1,371 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "DestructibleBase.generated.h"
+
+/**
+ * Enumeration for designer-selectable destruction style.
+ * Use to drive VFX, SFX, and logic in BP or C++ subclasses.
+ */
+UENUM(BlueprintType)
+enum class EDestructionStyle : uint8 {
+    Explosion,
+    Collapse,
+    Crumble
+};
+
+/**
+ * Struct: All interactions that destroy or affect this object funnel through here.
+ * All destruction events are logged for debug/replay and deterministic simulation.
+ */
+USTRUCT(BlueprintType)
+struct FDestructibleEvent {
+    GENERATED_BODY()
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString EventType;              // "Projectile", "Push", "Knockback", etc
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FVector Location;               // Location of event in world space
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FVector Direction;              // Force or impact direction
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float Magnitude;                // Strength of event (for scattering)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TWeakObjectPtr<AActor> InstigatorActor; // Actor that caused event
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FName Tag;                      // Tag for chaining, designer use
+
+    FDestructibleEvent()
+        : EventType(TEXT("Unknown")), Location(FVector::ZeroVector), Direction(FVector::UpVector),
+          Magnitude(0.f), InstigatorActor(nullptr), Tag(NAME_None) {}
+};
+
+/**
+ * ADestructibleBase -
+ * Core destructible/interactive actor for deterministic chunk/currency bursting and energetic prop destruction.
+ * See detailed usage and programmer tips at bottom of .cpp file!
+ */
+UCLASS()
+class YOURGAME_API ADestructibleBase : public AActor
+{
+    GENERATED_BODY()
+
+public:
+    ADestructibleBase();
+
+    // ==========================================================================
+    // === DESIGNER VARIABLES (EDITABLE, EXPOSED TO BP) =========================
+    // ==========================================================================
+
+    /** Actor class to spawn as currency chunk (bolt/coin/capsule etc.). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Chunks")
+    TSubclassOf<AActor> ChunkCurrencyClass;
+
+    /** How many currency chunks are spawned when destroyed. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Chunks", meta = (ClampMin = "1", ClampMax = "128"))
+    int32 ChunksToSpawn = 10;
+
+    /** Initial impulse force for scattering each chunk. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Chunks", meta = (ClampMin = "0.0", ClampMax = "5000.0"))
+    float ChunkScatterForce = 700.f;
+
+    /** Enable chunk pooling (for perf in debris- or pickup-intense level sections). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Optimization")
+    bool bUsePooling = true;
+
+    /** Switches SFX, VFX, BP logic etc. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Style")
+    EDestructionStyle DestructionStyle = EDestructionStyle::Explosion;
+
+    /** Particle FX played on destruction. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|FX")
+    UParticleSystem* DestructionVFX;
+
+    /** Sound played on destruction. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|SFX")
+    USoundBase* DestructionSFX;
+
+    /** If true, disables collision and hides mesh after destruction for perf. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization")
+    bool bCleanupAfterDestruction = true;
+
+    /** How many seconds after destruction to auto-destroy this actor? (0 means instant destroy) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization", meta = (ClampMin = "0.05", ClampMax = "10.0"))
+    float AutoDestroyDelay = 1.0f;
+
+    /** If true, disables sim/collision after breaking. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Optimization")
+    bool bDisablePhysicsAfterDestruction = true;
+
+    /** Seed for deterministic chunk scattering—set for repeatable destruction visuals. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Destruction|Determinism")
+    int32 DestructionSeed = 128;
+
+    // ==========================================================================
+    // === GAMEPLAY INTERFACE/UTILITY ===========================================
+    // ==========================================================================
+
+    /** Triggers the main destruction logic—call from projectile, script, AI, etc. */
+    UFUNCTION(BlueprintCallable, Category = "Destruction")
+    virtual void TriggerDestructionEvent(const FDestructibleEvent& Event);
+
+    /** Replay/debug all logged destruction events in order (for repeatability/testing). */
+    UFUNCTION(BlueprintCallable, Category = "Destruction")
+    void ReplayDestructionEvents();
+
+    /** Expose full event log for replay/debug. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Destruction")
+    TArray<FDestructibleEvent> EventLog;
+
+    /** BP event: Override to add bonus logic for designers. */
+    UFUNCTION(BlueprintImplementableEvent, Category = "Destruction")
+    void OnDestruction(const FDestructibleEvent& Event);
+
+    // ==========================================================================
+    // ==== ENGINE & OPTIMIZATION SUPPORT =======================================
+    // ==========================================================================
+
+    virtual void Tick(float DeltaTime) override;
+    virtual void BeginPlay() override;
+
+protected:
+    /** All core destruction simulation (FX, chunk scatter, disables, etc). */
+    virtual void SimulateDestruction(const FDestructibleEvent& Event);
+    /** Spawns chunk/currency pickups (with pooling if needed). */
+    void SpawnCurrencyChunks(int32 Num, const FVector& Center);
+
+    /** Pool management: acquire (or spawn) chunk, recycling for perf when possible. */
+    AActor* AcquirePooledChunk(const FVector& SpawnLoc, const FRotator& SpawnRot);
+
+    /** Chunk post-collection handler—hide and return to pool. */
+    UFUNCTION()
+    void OnChunkCollected(AActor* CollectedChunk);
+
+    /** Optional: For user code to explicitly recycle chunk. */
+    void ReturnChunkToPool(AActor* Chunk);
+
+    /** Tick-based auto-destroy timer; only enabled after destruction. */
+    float DestroyCountdown = 0.f;
+
+    /** Pool of reusable chunk actors. */
+    TArray<AActor*> ChunkPool;
+};
+
+
+#include "DestructibleBase.h"
+#include "Kismet/GameplayStatics.h"
+#include "Particles/ParticleSystemComponent.h"
+#include "Sound/SoundBase.h"
+#include "Components/PrimitiveComponent.h"
+
+// ===== CONSTRUCTOR =====
+ADestructibleBase::ADestructibleBase()
+{
+    PrimaryActorTick.bCanEverTick = false; // Tick only enabled after destruction
+    DestroyCountdown = 0.f;
+}
+
+// ===== BEGIN PLAY ======
+void ADestructibleBase::BeginPlay()
+{
+    Super::BeginPlay();
+    // For determinism (optional): Set up physics substepping if you use Chaos/GeometryCollection
+    // Eg:
+    // UPhysicsSettings* PhysicsSettings = UPhysicsSettings::Get();
+    // PhysicsSettings->bSubstepping = true;
+    // PhysicsSettings->MaxSubstepDeltaTime = 1.0f / 120.f;
+    // PhysicsSettings->MaxSubsteps = 1;
+    // If using a destructible component with custom seed: DestructibleComponent->SetSeed(DestructionSeed);
+}
+
+// ===== MAIN DESTRUCTION FUNCTION =====
+void ADestructibleBase::TriggerDestructionEvent(const FDestructibleEvent& Event)
+{
+    EventLog.Add(Event);
+    SimulateDestruction(Event);
+    OnDestruction(Event);
+
+    if (bCleanupAfterDestruction)
+    {
+        SetActorEnableCollision(false);
+        SetActorHiddenInGame(true);
+    }
+    // Tick-based auto-destroy: only start ticking after destroyed
+    if (AutoDestroyDelay > 0.01f)
+    {
+        DestroyCountdown = AutoDestroyDelay;
+        SetActorTickEnabled(true);
+    }
+    else
+    {
+        Destroy();
+    }
+}
+
+// ===== TICK FUNCTION FOR AUTO-DESTROY =====
+void ADestructibleBase::Tick(float DeltaTime)
+{
+    Super::Tick(DeltaTime);
+
+    if (DestroyCountdown > 0.f)
+    {
+        DestroyCountdown -= DeltaTime;
+        if (DestroyCountdown <= 0.f)
+        {
+            Destroy();
+            SetActorTickEnabled(false);
+        }
+    }
+}
+
+// ===== SIMULATE DESTRUCTION =====
+void ADestructibleBase::SimulateDestruction(const FDestructibleEvent& Event)
+{
+    // Visual and audio feedback (non-blocking)
+    if (DestructionVFX)
+        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), DestructionVFX, GetActorTransform());
+    if (DestructionSFX)
+        UGameplayStatics::PlaySoundAtLocation(this, DestructionSFX, GetActorLocation());
+
+    // Currency/Chunk burst (Ratchet & Clank style)
+    if (ChunkCurrencyClass && ChunksToSpawn > 0)
+        SpawnCurrencyChunks(ChunksToSpawn, Event.Location);
+
+    // (Optional) Collapse separate meshes, break chaos, etc. - override in child if needed
+
+    // Physics/collision optimization
+    if (bDisablePhysicsAfterDestruction)
+    {
+        TArray<UActorComponent*> Comps = GetComponentsByClass(UPrimitiveComponent::StaticClass());
+        for (UActorComponent* Comp : Comps)
+        {
+            if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp))
+            {
+                Prim->SetSimulatePhysics(false);
+                Prim->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+            }
+        }
+    }
+}
+
+// ===== CHUNK SPAWNING AND POOLING =====
+void ADestructibleBase::SpawnCurrencyChunks(int32 Num, const FVector& Center)
+{
+    FRandomStream Stream(DestructionSeed);
+
+    for (int32 i = 0; i < Num; ++i)
+    {
+        FVector Offset = Stream.VRand() * FMath::FRandRange(15.f, 60.f);
+        FVector SpawnLoc = Center + Offset;
+        FRotator Rot = FRotator::ZeroRotator;
+        AActor* Chunk = nullptr;
+
+        if (bUsePooling)
+        {
+            Chunk = AcquirePooledChunk(SpawnLoc, Rot);
+        }
+        else
+        {
+            Chunk = GetWorld()->SpawnActor<AActor>(ChunkCurrencyClass, SpawnLoc, Rot);
+        }
+
+        if (Chunk)
+        {
+            // If the chunk root is simulating physics, add impulse for burst
+            if (UPrimitiveComponent* Comp = Cast<UPrimitiveComponent>(Chunk->GetRootComponent()))
+            {
+                FVector ImpulseDir = Stream.VRand().GetSafeNormal();
+                Comp->AddImpulse(ImpulseDir * ChunkScatterForce);
+                Comp->SetCollisionObjectType(ECC_WorldDynamic);
+            }
+
+            // Bind collection delegate if your collectible supports it
+            // e.g., ICollectibleInterface* Collectible = Cast<ICollectibleInterface>(Chunk);
+            // if (Collectible)
+            //     Collectible->OnCollected().AddUObject(this, &ADestructibleBase::OnChunkCollected);
+        }
+    }
+}
+
+/** Pooling: Retrieve from pool or spawn if pool empty. */
+AActor* ADestructibleBase::AcquirePooledChunk(const FVector& SpawnLoc, const FRotator& SpawnRot)
+{
+    for (AActor* Chunk : ChunkPool)
+    {
+        if (Chunk && !Chunk->IsActorTickEnabled())
+        {
+            Chunk->SetActorLocationAndRotation(SpawnLoc, SpawnRot);
+            Chunk->SetActorHiddenInGame(false);
+            Chunk->SetActorEnableCollision(true);
+            Chunk->SetActorTickEnabled(true);
+            return Chunk;
+        }
+    }
+    // If pool empty, spawn new and add to pool
+    AActor* NewChunk = GetWorld()->SpawnActor<AActor>(ChunkCurrencyClass, SpawnLoc, SpawnRot);
+    if (NewChunk)
+    {
+        ChunkPool.Add(NewChunk);
+    }
+    return NewChunk;
+}
+
+/** When a chunk is collected, hide and recycle it for reuse. */
+void ADestructibleBase::OnChunkCollected(AActor* CollectedChunk)
+{
+    if (CollectedChunk)
+    {
+        CollectedChunk->SetActorHiddenInGame(true);
+        CollectedChunk->SetActorEnableCollision(false);
+        CollectedChunk->SetActorTickEnabled(false);
+    }
+}
+
+/** Explicitly return chunk to pool if using custom logic elsewhere. */
+void ADestructibleBase::ReturnChunkToPool(AActor* Chunk)
+{
+    if (Chunk && !ChunkPool.Contains(Chunk))
+    {
+        ChunkPool.Add(Chunk);
+    }
+}
+
+// ===== REPLAY/DEBUG SUPPORT =====
+void ADestructibleBase::ReplayDestructionEvents()
+{
+    for (const FDestructibleEvent& E : EventLog)
+        SimulateDestruction(E);
+}
+
+// ====== DESTROY AFTER DELAY (tick-based) ======
+void ADestructibleBase::HandleAutoDestroy()
+{
+    Destroy();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//=============================================================================
+//   USAGE TIPS FOR GAME DESIGNERS & PROGRAMMERS (READ THIS SECTION!)
+//=============================================================================
+/*
+
+========================================================================================
+For Game Designers:
+----------------------------------------------------------------------------------------
+- Place a Blueprint (BP) child of DestructibleBase in your level.
+- Set ChunkCurrencyClass to your coin/bolt/currency/capsule actor Blueprint.
+- Configure ChunksToSpawn, ChunkScatterForce, bCleanupAfterDestruction, DestructionStyle, etc.
+- Supply particle and sound effects for feedback.
+- Set a deterministic DestructionSeed for repeatable chunk bursts (useful for iterating and polish).
+- Call TriggerDestructionEvent from any gameplay event (projectile hit, melee, AI, overlap).
+- All events are logged – you can replay them in editor for bug fixing.
+- Override OnDestruction in BP to add bonus logic (spawn secrets, UI, SFX, camera shake).
+- Enable pooling for performance if you expect many destructibles at once.
+
+========================================================================================
+For Programmers:
+----------------------------------------------------------------------------------------
+- Extend SimulateDestruction for more complex break logic, e.g., mesh fracture, chain reactions.
+- Integrate OnChunkCollected with your currency/pickup system – call OnChunkCollected when player collects the chunk.
+- Use pooling for high-performance scenes: disable Tick except for the auto-destroy countdown when active.
+- For strict determinism: lock physics step (substepping), seed all randomness, and ensure all destruction logic is event-driven.
+- Optimize collision: disable all expensive traces/collisions after breaking.
+- Use ReplayDestructionEvents() to reproduce bugs or validate designer setups.
+
+========================================================================================
+
+*/

@@ -98,6 +98,16 @@ void UCursedAngelCameraComponent::TickComponent(float DeltaTime, ELevelTick Tick
 		EnemyCacheTimer = EnemyCacheInterval;
 	}
 
+	// Track air time for Platforming mode hysteresis
+	if (OwnerCharacter && OwnerCharacter->GetCharacterMovement() && OwnerCharacter->GetCharacterMovement()->IsFalling())
+	{
+		TimeInAir += DeltaTime;
+	}
+	else
+	{
+		TimeInAir = 0.0f;
+	}
+
 	// Update camera mode based on gameplay context
 	UpdateCameraMode(DeltaTime);
 
@@ -193,7 +203,7 @@ void UCursedAngelCameraComponent::UpdateCameraMode(float DeltaTime)
 			SetCameraMode(ECameraMode::Combat);
 		}
 	}
-	else if (IsInAir())
+	else if (IsInAir() && TimeInAir >= MinAirTimeForPlatformingMode)
 	{
 		if (CurrentCameraMode != ECameraMode::Platforming)
 		{
