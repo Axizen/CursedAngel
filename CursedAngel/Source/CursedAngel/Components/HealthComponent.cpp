@@ -1,170 +1,77 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/HealthComponent.h"
+#include "AI/EnemyDirectorSubsystem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 
 UHealthComponent::UHealthComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
-
-	// Default values
-	MaxHealth = 100.0f;
-	CurrentHealth = MaxHealth;
-	bIsDead = false;
-	bInvulnerable = false;
-	InvulnerabilityDuration = 0.0f;
-	LastDamageDealer = nullptr;
-	LastDamageType = EDamageType::Physical;
+	MaxHealth = 100.0f; CurrentHealth = MaxHealth; bIsDead = false; bInvulnerable = false; InvulnerabilityDuration = 0.0f; LastDamageDealer = nullptr; LastDamageType = EDamageType::Physical;
 }
 
 void UHealthComponent::BeginPlay()
 {
-	Super::BeginPlay();
-
-	// Initialize current health to max health
-	CurrentHealth = MaxHealth;
-	bIsDead = false;
-	bInvulnerable = false;
+	Super::BeginPlay(); CurrentHealth = MaxHealth; bIsDead = false; bInvulnerable = false;
 }
-
-void UHealthComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
-{
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-}
+void UHealthComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) { Super::TickComponent(DeltaTime, TickType, ThisTickFunction); }
 
 float UHealthComponent::TakeDamage(float Damage, EDamageType Type, AActor* DamageDealer)
 {
-	// Cannot take damage if dead or invulnerable
-	if (bIsDead || bInvulnerable)
-	{
-		return 0.0f;
-	}
-
-	// Clamp damage to positive values
+	if (bIsDead || bInvulnerable) return 0.0f;
 	Damage = FMath::Max(0.0f, Damage);
-
-	// Store damage dealer and type for death attribution
-	LastDamageDealer = DamageDealer;
-	LastDamageType = Type;
-
-	// Apply damage
+	if (Damage <= 0.0f) return 0.0f;
+	LastDamageDealer = DamageDealer; LastDamageType = Type;
+	const float PreviousHealth = CurrentHealth;
 	CurrentHealth = FMath::Max(0.0f, CurrentHealth - Damage);
-
-	// Broadcast damage taken event
-	OnDamageTaken.Broadcast(Damage, Type);
-
-	// Broadcast health changed event
+	const float ActualDamage = PreviousHealth - CurrentHealth;
+	OnDamageTaken.Broadcast(ActualDamage, Type);
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
-
-	// Check for death
-	if (CurrentHealth <= 0.0f)
+	if (const APawn* OwnerPawn = Cast<APawn>(GetOwner()); OwnerPawn && OwnerPawn->IsPlayerControlled())
 	{
-		Kill();
+		if (UWorld* World = GetWorld()) if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>()) Director->RecordPlayerDamageTaken(ActualDamage);
 	}
+	if (CurrentHealth <= 0.0f) Kill();
 	else if (InvulnerabilityDuration > 0.0f)
 	{
-		// Apply invulnerability frames
 		bInvulnerable = true;
-
-		// Clear existing timer if any
 		if (UWorld* World = GetWorld())
 		{
 			World->GetTimerManager().ClearTimer(InvulnerabilityTimerHandle);
-			World->GetTimerManager().SetTimer(
-				InvulnerabilityTimerHandle,
-				this,
-				&UHealthComponent::EndInvulnerability,
-				InvulnerabilityDuration,
-				false
-			);
+			World->GetTimerManager().SetTimer(InvulnerabilityTimerHandle, this, &UHealthComponent::EndInvulnerability, InvulnerabilityDuration, false);
 		}
 	}
-
-	return Damage;
+	return ActualDamage;
 }
 
 float UHealthComponent::Heal(float Amount)
 {
-	// Cannot heal if dead
-	if (bIsDead)
-	{
-		return 0.0f;
-	}
-
-	// Clamp heal amount to positive values
+	if (bIsDead) return 0.0f;
 	Amount = FMath::Max(0.0f, Amount);
-
-	// Calculate actual heal amount (cannot exceed max health)
-	float OldHealth = CurrentHealth;
+	const float OldHealth = CurrentHealth;
 	CurrentHealth = FMath::Min(MaxHealth, CurrentHealth + Amount);
-	float ActualHealAmount = CurrentHealth - OldHealth;
-
-	// Broadcast health changed event if health actually changed
-	if (ActualHealAmount > 0.0f)
-	{
-		OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
-	}
-
-	return ActualHealAmount;
+	const float ActualHeal = CurrentHealth - OldHealth;
+	if (ActualHeal > 0.0f) OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	return ActualHeal;
 }
 
 void UHealthComponent::Kill()
 {
-	// Already dead, do nothing
-	if (bIsDead)
-	{
-		return;
-	}
-
-	// Set death state
-	bIsDead = true;
-	CurrentHealth = 0.0f;
-
-	// Clear invulnerability timer
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(InvulnerabilityTimerHandle);
-	}
+	if (bIsDead) return;
+	bIsDead = true; CurrentHealth = 0.0f;
+	if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(InvulnerabilityTimerHandle);
 	bInvulnerable = false;
-
-	// Broadcast death event
 	OnDeath.Broadcast(LastDamageDealer, LastDamageType);
-
-	// Broadcast final health changed event
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
 }
 
-bool UHealthComponent::IsAlive() const
-{
-	return !bIsDead && CurrentHealth > 0.0f;
-}
-
-float UHealthComponent::GetHealthPercent() const
-{
-	if (MaxHealth <= 0.0f)
-	{
-		return 0.0f;
-	}
-
-	return CurrentHealth / MaxHealth;
-}
-
+bool UHealthComponent::IsAlive() const { return !bIsDead && CurrentHealth > 0.0f; }
+float UHealthComponent::GetHealthPercent() const { return MaxHealth <= 0.0f ? 0.0f : CurrentHealth / MaxHealth; }
 void UHealthComponent::SetInvulnerable(bool bNewInvulnerable)
 {
 	bInvulnerable = bNewInvulnerable;
-
-	// Clear timer if disabling invulnerability
-	if (!bInvulnerable)
-	{
-		if (UWorld* World = GetWorld())
-		{
-			World->GetTimerManager().ClearTimer(InvulnerabilityTimerHandle);
-		}
-	}
+	if (!bInvulnerable) if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(InvulnerabilityTimerHandle);
 }
-
-void UHealthComponent::EndInvulnerability()
-{
-	bInvulnerable = false;
-}
+void UHealthComponent::EndInvulnerability() { bInvulnerable = false; }
