@@ -40,8 +40,7 @@ bool UEnvironmentCombatSubsystem::LaunchHeldDebris(AActor* Holder, AActor* Targe
 	{
 		if (IsValid(Debris) && Debris->GetMagnetHolder() == Holder)
 		{
-			const FVector Direction = (Target->GetActorLocation() - Debris->GetActorLocation()).GetSafeNormal();
-			Debris->LaunchDebris(Direction, LaunchSpeed, StyleMultiplier);
+			Debris->LaunchDebris((Target->GetActorLocation() - Debris->GetActorLocation()).GetSafeNormal(), LaunchSpeed, StyleMultiplier);
 			return true;
 		}
 	}
@@ -50,23 +49,48 @@ bool UEnvironmentCombatSubsystem::LaunchHeldDebris(AActor* Holder, AActor* Targe
 
 void UEnvironmentCombatSubsystem::ReleaseHeldDebris(AActor* Holder)
 {
-	for (ACombatDebris* Debris : ActiveDebris) if (IsValid(Debris) && Debris->GetMagnetHolder() == Holder) Debris->ReleaseMagnet();
+	for (ACombatDebris* Debris : ActiveDebris)
+	{
+		if (IsValid(Debris) && Debris->GetMagnetHolder() == Holder) Debris->ReleaseMagnet();
+	}
 }
 
 void UEnvironmentCombatSubsystem::RecordArenaChange(FName RegionId, ADestructibleBase* Source)
 {
-	if (!RegionId.IsNone()) ChangedArenaRegions.Add(RegionId);
+	RecordStructuralPieceBroken(RegionId, Source, 0.0f);
+}
+
+void UEnvironmentCombatSubsystem::RecordStructuralPieceBroken(FName RegionId, ADestructibleBase* Source, float ImpactSpeed)
+{
+	if (RegionId.IsNone()) return;
+	FArenaRegionState& State = ArenaRegions.FindOrAdd(RegionId);
+	State.RegionId = RegionId;
+	const bool bWasChanged = State.bChanged;
+	State.bChanged = true;
+	++State.StructuralPiecesBroken;
+	State.LastImpactSpeed = FMath::Max(State.LastImpactSpeed, ImpactSpeed);
+	// Notify on each structural break so Blueprint routes can update incrementally (e.g. bridge sections).
+	OnArenaRegionChanged.Broadcast(RegionId, Source);
 }
 
 bool UEnvironmentCombatSubsystem::HasArenaRegionChanged(FName RegionId) const
 {
-	return !RegionId.IsNone() && ChangedArenaRegions.Contains(RegionId);
+	const FArenaRegionState* State = ArenaRegions.Find(RegionId);
+	return State && State->bChanged;
+}
+
+FArenaRegionState UEnvironmentCombatSubsystem::GetArenaRegionState(FName RegionId) const
+{
+	if (const FArenaRegionState* State = ArenaRegions.Find(RegionId)) return *State;
+	FArenaRegionState Empty;
+	Empty.RegionId = RegionId;
+	return Empty;
 }
 
 TArray<FName> UEnvironmentCombatSubsystem::GetChangedArenaRegions() const
 {
 	TArray<FName> Regions;
-	ChangedArenaRegions.GenerateKeyArray(Regions);
+	ArenaRegions.GetKeys(Regions);
 	return Regions;
 }
 
