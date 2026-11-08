@@ -31,31 +31,23 @@ void AEnemyBase::PostInitializeComponents()
 	Super::PostInitializeComponents();
 	if (!AIControllerClass) AIControllerClass = AEnemyAIController::StaticClass();
 }
-
 void AEnemyBase::BeginPlay()
 {
 	Super::BeginPlay();
 	if (HealthComponent) HealthComponent->OnDeath.AddDynamic(this, &AEnemyBase::OnDeath);
-	LoadStatsFromDataAsset();
-	FindPlayerTarget();
+	LoadStatsFromDataAsset(); FindPlayerTarget();
 	if (UEnemyManagerSubsystem* Manager = GetWorld()->GetSubsystem<UEnemyManagerSubsystem>()) Manager->RegisterEnemy(this);
 	OnEnemySpawned.Broadcast();
 }
-
 void AEnemyBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (GetWorld()) if (UEnemyManagerSubsystem* Manager = GetWorld()->GetSubsystem<UEnemyManagerSubsystem>()) Manager->UnregisterEnemy(this);
 	Super::EndPlay(EndPlayReason);
 }
-
 void AEnemyBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (TargetPlayer && HealthComponent && HealthComponent->IsAlive())
-	{
-		const float Distance = GetDistanceToPlayer();
-		if (Distance >= 0.0f && Distance <= AggroRange) bIsAggro = true;
-	}
+	if (TargetPlayer && HealthComponent && HealthComponent->IsAlive() && GetDistanceToPlayer() <= AggroRange) bIsAggro = true;
 }
 
 void AEnemyBase::Initialize(const FEnemyStats& InStats)
@@ -78,21 +70,17 @@ void AEnemyBase::Initialize(const FEnemyStats& InStats)
 
 void AEnemyBase::PerformAttack()
 {
-	if (!CanAttack() || !TargetPlayer) return;
-	const float Distance = GetDistanceToPlayer();
-	if (Distance < 0.0f || Distance > Stats.AttackRange) return;
+	if (!CanAttack() || !TargetPlayer || GetDistanceToPlayer() < 0.0f || GetDistanceToPlayer() > Stats.AttackRange) return;
 	LastAttackTime = GetWorld()->GetTimeSeconds();
 	if (UHealthComponent* PlayerHealth = TargetPlayer->FindComponentByClass<UHealthComponent>()) PlayerHealth->TakeDamage(AttackDamage, EDamageType::Physical, this);
 	OnAttackPerformed.Broadcast();
 }
-
 bool AEnemyBase::FindPlayerTarget()
 {
 	if (TargetPlayer) return true;
 	if (APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0)) { TargetPlayer = Cast<ACursedAngelCharacter>(PlayerPawn); return TargetPlayer != nullptr; }
 	return false;
 }
-
 float AEnemyBase::GetDistanceToPlayer() const { return TargetPlayer ? FVector::Dist(GetActorLocation(), TargetPlayer->GetActorLocation()) : -1.0f; }
 bool AEnemyBase::CanAttack() const { return HealthComponent && HealthComponent->IsAlive() && GetWorld() && GetWorld()->GetTimeSeconds() - LastAttackTime >= AttackCooldown; }
 void AEnemyBase::OnDeath(AActor* Killer, EDamageType DamageType) { HandleDeath(Killer); }
@@ -110,14 +98,12 @@ void AEnemyBase::HandleDeath(AActor* Killer)
 			const bool bEnvironmentalKill = Killer && Killer != TargetPlayer && !Killer->IsA(AEnemyBase::StaticClass());
 			StyleComp->OnEnemyKilled(this, WeaponUsed, bEnvironmentalKill);
 		}
-		if (UCursedAngelComponent* CursedAngelComp = TargetPlayer->GetCursedAngelComponent()) CursedAngelComp->AddDataPoints(Stats.StyleValue);
+		if (UCursedAngelComponent* Data = TargetPlayer->GetCursedAngelComponent()) Data->AddDataPoints(Stats.StyleValue);
 	}
-	OnEnemyDeath.Broadcast(Killer);
-	SpawnCurrencyDrops();
+	OnEnemyDeath.Broadcast(Killer); SpawnCurrencyDrops();
 	FTimerHandle TimerHandle;
 	GetWorld()->GetTimerManager().SetTimer(TimerHandle, this, &AEnemyBase::K2_DestroyActor, DeathDestroyDelay, false);
 }
-
 void AEnemyBase::SpawnCurrencyDrops()
 {
 	if (FMath::FRand() > CurrencyConfig.DropChance) return;
@@ -125,23 +111,30 @@ void AEnemyBase::SpawnCurrencyDrops()
 	const int32 Essence = EnemyType == EEnemyType::Fodder ? 0 : FMath::RandRange(CurrencyConfig.MinCurseEssence, CurrencyConfig.MaxCurseEssence);
 	UE_LOG(LogTemp, Log, TEXT("%s dropped %d Data Fragments and %d Curse Essence"), *GetName(), Data, Essence);
 }
-
 void AEnemyBase::SelectAttackPattern()
 {
-	if (AttackPatterns.Num() == 0) { CurrentAttackPattern = NAME_None; return; }
+	if (AttackPatterns.Num() == 0) { ConfiguredAttackPattern = NAME_None; CurrentAttackPattern = NAME_None; return; }
 	ConfiguredAttackPattern = AttackPatterns[FMath::RandRange(0, AttackPatterns.Num() - 1)];
 	CurrentAttackPattern = ConfiguredAttackPattern;
 }
-
 FName AEnemyBase::GetCurrentAttackPattern() const { return CurrentAttackPattern; }
 
 void AEnemyBase::ApplyAdaptiveReaction(EEnemyAdaptiveTactic NewTactic, float EngagementDistanceMultiplier, FName AttackPattern)
 {
-	const bool bChanged = AdaptiveTactic != NewTactic || !FMath::IsNearlyEqual(AdaptiveEngagementDistanceMultiplier, EngagementDistanceMultiplier) || (AttackPattern != NAME_None && CurrentAttackPattern != AttackPattern);
+	const FName NewPattern = AttackPattern.IsNone() ? ConfiguredAttackPattern : AttackPattern;
+	const bool bChanged = AdaptiveTactic != NewTactic || !FMath::IsNearlyEqual(AdaptiveEngagementDistanceMultiplier, EngagementDistanceMultiplier) || CurrentAttackPattern != NewPattern;
 	AdaptiveTactic = NewTactic;
 	AdaptiveEngagementDistanceMultiplier = FMath::Clamp(EngagementDistanceMultiplier, 0.25f, 3.0f);
-	CurrentAttackPattern = AttackPattern.IsNone() ? ConfiguredAttackPattern : AttackPattern;
+	CurrentAttackPattern = NewPattern;
 	if (bChanged) OnAdaptiveReactionApplied.Broadcast(AdaptiveTactic, AdaptiveEngagementDistanceMultiplier, CurrentAttackPattern);
+}
+void AEnemyBase::SetCoordinatedMoveTarget(FVector Target) { CoordinatedMoveTarget = Target; bHasCoordinatedMoveTarget = true; }
+void AEnemyBase::ClearCoordinatedMoveTarget() { bHasCoordinatedMoveTarget = false; }
+void AEnemyBase::ApplyCrowdImpact(FVector ImpulseVelocity)
+{
+	if (!HealthComponent || !HealthComponent->IsAlive() || ImpulseVelocity.Size() < MinimumCrowdImpact) return;
+	const float Resistance = FMath::Max(0.1f, CrowdKnockbackResistance);
+	LaunchCharacter(ImpulseVelocity / Resistance, true, true);
 }
 
 void AEnemyBase::LoadStatsFromDataAsset()
