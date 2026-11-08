@@ -4,6 +4,7 @@
 #include "AI/EnemyBase.h"
 #include "Characters/CursedAngelCharacter.h"
 #include "Components/HealthComponent.h"
+#include "Components/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -14,256 +15,180 @@
 AEnemyAIController::AEnemyAIController()
 {
 	PrimaryActorTick.bCanEverTick = true;
-
-	// Default values
 	FollowDistance = 300.0f;
 	AttackDistance = 200.0f;
 	PatrolRadius = 500.0f;
 	bUsePatrol = true;
 	PatrolWaitTime = 3.0f;
 	AcceptanceRadius = 50.0f;
-
 	ControlledEnemy = nullptr;
 	TargetPlayer = nullptr;
 	LastPatrolTime = 0.0f;
 	PatrolOrigin = FVector::ZeroVector;
 	CurrentPatrolPoint = FVector::ZeroVector;
-
-	// Create Blackboard component
+	CurrentAdaptiveMoveTarget = FVector::ZeroVector;
 	BlackboardComponent = CreateDefaultSubobject<UBlackboardComponent>(TEXT("BlackboardComponent"));
 }
 
 void AEnemyAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
-
-	// Cache controlled enemy reference
 	ControlledEnemy = Cast<AEnemyBase>(InPawn);
-	if (ControlledEnemy)
+	if (!ControlledEnemy) return;
+	PatrolOrigin = ControlledEnemy->GetActorLocation();
+	TargetPlayer = Cast<ACursedAngelCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	if (ControlledEnemy->bUseBehaviorTree && ControlledEnemy->BehaviorTreeAsset)
 	{
-		// Store patrol origin
-		PatrolOrigin = ControlledEnemy->GetActorLocation();
-		
-		// Find player target
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
-		if (PlayerPawn)
-		{
-			TargetPlayer = Cast<ACursedAngelCharacter>(PlayerPawn);
-		}
-
-		// Check if enemy should use Behavior Tree
-		if (ControlledEnemy->bUseBehaviorTree && ControlledEnemy->BehaviorTreeAsset)
-		{
-			StartBehaviorTree(ControlledEnemy->BehaviorTreeAsset, ControlledEnemy->BlackboardAsset);
-		}
+		StartBehaviorTree(ControlledEnemy->BehaviorTreeAsset, ControlledEnemy->BlackboardAsset);
 	}
 }
 
 void AEnemyAIController::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
 	UpdateAI(DeltaTime);
+}
+
+EEnemyAdaptiveTactic AEnemyAIController::GetActiveAdaptiveTactic() const
+{
+	return ControlledEnemy ? ControlledEnemy->AdaptiveTactic : EEnemyAdaptiveTactic::Default;
 }
 
 void AEnemyAIController::UpdateAI(float DeltaTime)
 {
-	// Skip if using Behavior Tree - BT handles AI logic
-	if (IsUsingBehaviorTree())
+	// Behavior Trees may read AdaptiveTactic and CurrentAttackPattern from the pawn/blackboard;
+	// the built-in state machine must not compete with a running tree.
+	if (IsUsingBehaviorTree()) return;
+	if (!ControlledEnemy || !ControlledEnemy->HealthComponent || !ControlledEnemy->HealthComponent->IsAlive()) return;
+	if (!TargetPlayer) TargetPlayer = Cast<ACursedAngelCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	if (!TargetPlayer) { if (bUsePatrol) Patrol(); return; }
+
+	const float Distance = ControlledEnemy->GetDistanceToPlayer();
+	if (Distance < 0.0f || Distance > ControlledEnemy->AggroRange)
 	{
+		if (bUsePatrol) Patrol();
 		return;
 	}
-
-	// Early exit if no controlled enemy or enemy is dead
-	if (!ControlledEnemy || !ControlledEnemy->HealthComponent || !ControlledEnemy->HealthComponent->IsAlive())
-	{
-		return;
-	}
-
-	// Try to find player if we don't have a target
-	if (!TargetPlayer)
-	{
-		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
-		if (PlayerPawn)
-		{
-			TargetPlayer = Cast<ACursedAngelCharacter>(PlayerPawn);
-		}
-		
-		// If still no player, just patrol
-		if (!TargetPlayer)
-		{
-			if (bUsePatrol)
-			{
-				Patrol();
-			}
-			return;
-		}
-	}
-
-	// Get distance to player
-	float DistanceToPlayer = ControlledEnemy->GetDistanceToPlayer();
-	
-	// If player is out of range, patrol or idle
-	if (DistanceToPlayer < 0.0f || DistanceToPlayer > ControlledEnemy->AggroRange)
-	{
-		if (bUsePatrol)
-		{
-			Patrol();
-		}
-		return;
-	}
-
-	// Player is in aggro range - set as focus
 	SetFocus(TargetPlayer);
 
-	// Check if in attack range
-	if (DistanceToPlayer <= AttackDistance)
+	const EEnemyAdaptiveTactic Tactic = GetActiveAdaptiveTactic();
+	const bool bPlayerAirborne = TargetPlayer->GetCharacterMovement() && TargetPlayer->GetCharacterMovement()->IsFalling();
+	if (Tactic == EEnemyAdaptiveTactic::PunishAirborne && bPlayerAirborne)
 	{
-		AttackPlayer();
+		// Close the gap while the player is airborne; the configured anti-air pattern is
+		// available on the enemy for Blueprint/Behavior Tree attack selection.
+		MoveTowardsPlayer(FMath::Max(AcceptanceRadius, AttackDistance * 0.75f));
+		if (Distance <= AttackDistance && ControlledEnemy->CanAttack()) AttackPlayer();
+		return;
 	}
-	// Check if in follow range
-	else if (DistanceToPlayer <= ControlledEnemy->AggroRange)
+	if (Tactic == EEnemyAdaptiveTactic::StrafePlayer || Tactic == EEnemyAdaptiveTactic::DisplaceFromDestruction)
 	{
-		MoveToPlayer();
+		if (Distance <= AttackDistance)
+		{
+			AttackPlayer();
+		}
+		else
+		{
+			MoveToAdaptivePosition(Tactic);
+		}
+		return;
 	}
+
+	if (Distance <= AttackDistance) AttackPlayer();
+	else if (Tactic == EEnemyAdaptiveTactic::RushPlayer) MoveTowardsPlayer(FMath::Max(AcceptanceRadius, AttackDistance * 0.65f));
+	else if (Tactic == EEnemyAdaptiveTactic::MaintainRange)
+	{
+		const float DesiredRange = FMath::Max(AttackDistance, FollowDistance * ControlledEnemy->AdaptiveEngagementDistanceMultiplier);
+		MoveTowardsPlayer(DesiredRange);
+	}
+	else MoveToPlayer();
+}
+
+void AEnemyAIController::MoveTowardsPlayer(float AcceptanceDistance)
+{
+	if (TargetPlayer) MoveToActor(TargetPlayer, AcceptanceDistance, true, true, true, nullptr, true);
+}
+
+void AEnemyAIController::MoveToAdaptivePosition(EEnemyAdaptiveTactic Tactic)
+{
+	if (!ControlledEnemy || !TargetPlayer || !GetWorld()) return;
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (CurrentAdaptiveMoveTarget.IsNearlyZero() || FVector::Dist(ControlledEnemy->GetActorLocation(), CurrentAdaptiveMoveTarget) <= AcceptanceRadius || Now - LastAdaptiveMoveTime >= FMath::Max(0.25f, AdaptiveManeuverInterval))
+	{
+		const FVector ToPlayer = (TargetPlayer->GetActorLocation() - ControlledEnemy->GetActorLocation()).GetSafeNormal2D();
+		const FVector Right = FVector::CrossProduct(FVector::UpVector, ToPlayer).GetSafeNormal();
+		const float Distance = AdaptiveManeuverDistance * (ControlledEnemy->AdaptiveEngagementDistanceMultiplier);
+		if (Tactic == EEnemyAdaptiveTactic::DisplaceFromDestruction)
+		{
+			// Rotate around and bias outward to avoid standing in the player's recently
+			// exploited close-range/destruction space; no destructible actor is required.
+			CurrentAdaptiveMoveTarget = TargetPlayer->GetActorLocation() - ToPlayer * Distance + Right * (Distance * 0.5f * StrafeDirection);
+		}
+		else
+		{
+			CurrentAdaptiveMoveTarget = TargetPlayer->GetActorLocation() + Right * Distance * StrafeDirection;
+		}
+		StrafeDirection *= -1;
+		LastAdaptiveMoveTime = Now;
+	}
+	MoveToLocation(CurrentAdaptiveMoveTarget, AcceptanceRadius, true, true, false, true, nullptr, true);
 }
 
 void AEnemyAIController::MoveToPlayer()
 {
-	if (!TargetPlayer || !ControlledEnemy)
-	{
-		return;
-	}
-
-	// Move towards player
-	MoveToActor(TargetPlayer, FollowDistance, true, true, true, nullptr, true);
+	if (!TargetPlayer || !ControlledEnemy) return;
+	const float DesiredDistance = FMath::Max(AcceptanceRadius, FollowDistance * ControlledEnemy->AdaptiveEngagementDistanceMultiplier);
+	MoveTowardsPlayer(DesiredDistance);
 }
 
 void AEnemyAIController::AttackPlayer()
 {
-	if (!ControlledEnemy || !TargetPlayer)
-	{
-		return;
-	}
-
-	// Stop movement
+	if (!ControlledEnemy || !TargetPlayer) return;
 	StopMovement();
-
-	// Face the player
-	FVector DirectionToPlayer = TargetPlayer->GetActorLocation() - ControlledEnemy->GetActorLocation();
-	DirectionToPlayer.Z = 0.0f;
-	DirectionToPlayer.Normalize();
-	
-	FRotator TargetRotation = DirectionToPlayer.Rotation();
-	ControlledEnemy->SetActorRotation(TargetRotation);
-
-	// Perform attack if cooldown is ready
-	if (ControlledEnemy->CanAttack())
-	{
-		ControlledEnemy->PerformAttack();
-	}
+	FVector Direction = TargetPlayer->GetActorLocation() - ControlledEnemy->GetActorLocation();
+	Direction.Z = 0.0f;
+	if (!Direction.IsNearlyZero()) ControlledEnemy->SetActorRotation(Direction.Rotation());
+	if (ControlledEnemy->CanAttack()) ControlledEnemy->PerformAttack();
 }
 
 void AEnemyAIController::Patrol()
 {
-	if (!ControlledEnemy)
-	{
-		return;
-	}
-
-	float CurrentTime = GetWorld()->GetTimeSeconds();
-
-	// Check if we need a new patrol point
-	bool bNeedNewPoint = false;
-	
-	// If we don't have a patrol point yet
-	if (CurrentPatrolPoint.IsZero())
-	{
-		bNeedNewPoint = true;
-	}
-	// If we've reached the current patrol point
-	else if (FVector::Dist(ControlledEnemy->GetActorLocation(), CurrentPatrolPoint) <= AcceptanceRadius)
-	{
-		// Wait at patrol point
-		if (CurrentTime - LastPatrolTime >= PatrolWaitTime)
-		{
-			bNeedNewPoint = true;
-		}
-	}
-
-	// Generate new patrol point if needed
+	if (!ControlledEnemy || !GetWorld()) return;
+	const float CurrentTime = GetWorld()->GetTimeSeconds();
+	bool bNeedNewPoint = CurrentPatrolPoint.IsZero();
+	if (!bNeedNewPoint && FVector::Dist(ControlledEnemy->GetActorLocation(), CurrentPatrolPoint) <= AcceptanceRadius && CurrentTime - LastPatrolTime >= PatrolWaitTime) bNeedNewPoint = true;
 	if (bNeedNewPoint)
 	{
 		CurrentPatrolPoint = GetRandomPatrolPoint();
 		LastPatrolTime = CurrentTime;
-		
-		// Move to new patrol point
 		MoveToLocation(CurrentPatrolPoint, AcceptanceRadius, true, true, false, true, nullptr, true);
 	}
 }
 
 FVector AEnemyAIController::GetRandomPatrolPoint() const
 {
-	// Generate random point within patrol radius
-	FVector RandomDirection = FVector(
-		FMath::FRandRange(-1.0f, 1.0f),
-		FMath::FRandRange(-1.0f, 1.0f),
-		0.0f
-	);
-	RandomDirection.Normalize();
-
-	float RandomDistance = FMath::FRandRange(PatrolRadius * 0.3f, PatrolRadius);
-	FVector PatrolPoint = PatrolOrigin + (RandomDirection * RandomDistance);
-
-	return PatrolPoint;
+	FVector Direction(FMath::FRandRange(-1.0f, 1.0f), FMath::FRandRange(-1.0f, 1.0f), 0.0f);
+	Direction = Direction.GetSafeNormal();
+	return PatrolOrigin + Direction * FMath::FRandRange(PatrolRadius * 0.3f, PatrolRadius);
 }
 
 void AEnemyAIController::StartBehaviorTree(UBehaviorTree* BehaviorTree, UBlackboardData* BlackboardAsset)
 {
-	if (!BehaviorTree)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AEnemyAIController::StartBehaviorTree - BehaviorTree is null"));
-		return;
-	}
-
-	// Initialize Blackboard if provided
-	if (BlackboardAsset && BlackboardComponent)
-	{
-		UseBlackboard(BlackboardAsset, BlackboardComponent);
-	}
-
-	// Run Behavior Tree
-	bool bSuccess = RunBehaviorTree(BehaviorTree);
-	if (bSuccess)
-	{
-		UE_LOG(LogTemp, Log, TEXT("AEnemyAIController::StartBehaviorTree - Successfully started BehaviorTree: %s"), *BehaviorTree->GetName());
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("AEnemyAIController::StartBehaviorTree - Failed to start BehaviorTree: %s"), *BehaviorTree->GetName());
-	}
+	if (!BehaviorTree) { UE_LOG(LogTemp, Warning, TEXT("StartBehaviorTree: BehaviorTree is null")); return; }
+	if (BlackboardAsset && BlackboardComponent) UseBlackboard(BlackboardAsset, BlackboardComponent);
+	if (!RunBehaviorTree(BehaviorTree)) UE_LOG(LogTemp, Warning, TEXT("StartBehaviorTree: Failed to start %s"), *BehaviorTree->GetName());
 }
 
 void AEnemyAIController::StopBehaviorTree()
 {
-	UBrainComponent* BrainComp = GetBrainComponent();
-	if (BrainComp)
+	if (UBrainComponent* Brain = GetBrainComponent())
 	{
-		UBehaviorTreeComponent* BTComp = Cast<UBehaviorTreeComponent>(BrainComp);
-		if (BTComp)
-		{
-			BTComp->StopTree();
-			UE_LOG(LogTemp, Log, TEXT("AEnemyAIController::StopBehaviorTree - Behavior Tree stopped"));
-		}
+		if (UBehaviorTreeComponent* Tree = Cast<UBehaviorTreeComponent>(Brain)) Tree->StopTree();
 	}
 }
 
 bool AEnemyAIController::IsUsingBehaviorTree() const
 {
-	UBrainComponent* BrainComp = GetBrainComponent();
-	if (BrainComp)
-	{
-		return BrainComp->IsRunning();
-	}
-	return false;
+	const UBrainComponent* Brain = GetBrainComponent();
+	return Brain && Brain->IsRunning();
 }

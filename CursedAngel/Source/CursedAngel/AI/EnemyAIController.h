@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "AIController.h"
+#include "AI/EnemyManagerSubsystem.h"
 #include "EnemyAIController.generated.h"
 
 class AEnemyBase;
@@ -12,120 +13,45 @@ class UBehaviorTree;
 class UBlackboardData;
 class UBlackboardComponent;
 
-/**
- * AI Controller for enemy characters
- * Implements simple state machine for patrol, chase, and attack behaviors
- */
+/** AI controller supporting baseline combat plus tactics selected by UEnemyManagerSubsystem. */
 UCLASS()
 class CURSEDANGEL_API AEnemyAIController : public AAIController
 {
 	GENERATED_BODY()
-
 public:
 	AEnemyAIController();
-
 protected:
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void Tick(float DeltaTime) override;
-
 public:
-	// ========== Properties ==========
-
-	/** Distance to maintain from player when following */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	float FollowDistance;
-
-	/** Distance at which enemy will attack */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	float AttackDistance;
-
-	/** Radius for patrol movement */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	float PatrolRadius;
-
-	/** Whether this AI should patrol when idle */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	bool bUsePatrol;
-
-	/** Time between patrol point changes */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	float PatrolWaitTime;
-
-	/** Acceptance radius for movement goals */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI")
-	float AcceptanceRadius;
-
-	/** Blackboard component for Behavior Tree data */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI|Behavior Tree")
-	UBlackboardComponent* BlackboardComponent;
-
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI", meta=(ToolTip="Baseline distance to maintain while following. Adaptive rules scale this value.")) float FollowDistance;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI") float AttackDistance;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI") float PatrolRadius;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI") bool bUsePatrol;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI") float PatrolWaitTime;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI") float AcceptanceRadius;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Adaptive", meta=(ClampMin="0.25", ClampMax="3.0", ToolTip="How far an adaptive strafe/displacement maneuver moves from the player.")) float AdaptiveManeuverDistance = 350.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AI|Adaptive", meta=(ClampMin="0.25", ClampMax="5.0", ToolTip="Seconds between repositioning moves for strafe/displacement tactics.")) float AdaptiveManeuverInterval = 1.5f;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="AI|Behavior Tree") UBlackboardComponent* BlackboardComponent;
+	UFUNCTION(BlueprintPure, Category="AI|Adaptive") EEnemyAdaptiveTactic GetActiveAdaptiveTactic() const;
 protected:
-	// ========== Internal State ==========
-
-	/** Cached reference to controlled enemy */
-	UPROPERTY()
-	AEnemyBase* ControlledEnemy;
-
-	/** Cached reference to target player */
-	UPROPERTY()
-	ACursedAngelCharacter* TargetPlayer;
-
-	/** Initial spawn location for patrol */
+	UPROPERTY() AEnemyBase* ControlledEnemy;
+	UPROPERTY() ACursedAngelCharacter* TargetPlayer;
 	FVector PatrolOrigin;
-
-	/** Time of last patrol point change */
 	float LastPatrolTime;
-
-	/** Current patrol destination */
 	FVector CurrentPatrolPoint;
-
-	// ========== Functions ==========
-
-	/**
-	 * Update AI behavior based on current state
-	 * @param DeltaTime Time since last update
-	 */
+	FVector CurrentAdaptiveMoveTarget;
+	float LastAdaptiveMoveTime = -1.0f;
+	int32 StrafeDirection = 1;
 	void UpdateAI(float DeltaTime);
-
-	/**
-	 * Move towards the player
-	 */
+	void MoveTowardsPlayer(float AcceptanceDistance);
+	void MoveToAdaptivePosition(EEnemyAdaptiveTactic Tactic);
 	void MoveToPlayer();
-
-	/**
-	 * Stop and attack the player
-	 */
 	void AttackPlayer();
-
-	/**
-	 * Patrol around spawn point
-	 */
 	void Patrol();
-
-	/**
-	 * Generate a random patrol point within patrol radius
-	 * @return Random location for patrol
-	 */
 	FVector GetRandomPatrolPoint() const;
-
 public:
-	// ========== Behavior Tree Functions ==========
-
-	/**
-	 * Start a Behavior Tree for this AI controller
-	 * @param BehaviorTree The Behavior Tree asset to run
-	 * @param BlackboardAsset The Blackboard data asset to use (optional)
-	 */
 	void StartBehaviorTree(UBehaviorTree* BehaviorTree, UBlackboardData* BlackboardAsset);
-
-	/**
-	 * Stop the currently running Behavior Tree
-	 */
 	void StopBehaviorTree();
-
-	/**
-	 * Check if this AI controller is currently using a Behavior Tree
-	 * @return True if a Behavior Tree is running, false if using simple AI
-	 */
 	bool IsUsingBehaviorTree() const;
 };
