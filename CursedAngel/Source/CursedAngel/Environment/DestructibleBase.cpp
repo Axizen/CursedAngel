@@ -4,6 +4,8 @@
 #include "AI/EnemyDirectorSubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
+#include "Environment/CombatDebris.h"
+#include "Environment/EnvironmentCombatSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "GeometryCollection/GeometryCollectionActor.h"
@@ -20,149 +22,104 @@ ADestructibleBase::ADestructibleBase()
 	IntactMeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	IntactMeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
 }
-
-void ADestructibleBase::BeginPlay()
-{
-	Super::BeginPlay();
-	Health = MaxHealth;
-	bHasBeenDestroyed = false;
-}
-
+void ADestructibleBase::BeginPlay() { Super::BeginPlay(); Health = MaxHealth; bHasBeenDestroyed = false; }
 void ADestructibleBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	TArray<AStaticMeshActor*> Expired;
-	for (auto& Pair : ActiveChunks)
-	{
-		Pair.Value -= DeltaTime;
-		if (Pair.Value <= 0.0f) Expired.Add(Pair.Key);
-	}
-	for (AStaticMeshActor* Chunk : Expired)
-	{
-		ActiveChunks.Remove(Chunk);
-		ReturnChunkToPool(Chunk);
-	}
+	for (auto& Pair : ActiveChunks) { Pair.Value -= DeltaTime; if (Pair.Value <= 0.0f) Expired.Add(Pair.Key); }
+	for (AStaticMeshActor* Chunk : Expired) { ActiveChunks.Remove(Chunk); ReturnChunkToPool(Chunk); }
 }
-
 void ADestructibleBase::TakeDamageCustom(float DamageAmount, AActor* DamageCauser)
 {
 	if (bHasBeenDestroyed || Health <= 0.0f || DamageAmount <= 0.0f) return;
-	LastDamageCauser = DamageCauser;
-	Health = FMath::Max(0.0f, Health - DamageAmount);
+	LastDamageCauser = DamageCauser; Health = FMath::Max(0.0f, Health - DamageAmount);
 	if (Health <= 0.0f) DestroyObject();
 }
-
+void ADestructibleBase::ApplyStructuralImpact(float ImpactSpeed, AActor* ImpactCauser, float StyleMultiplier)
+{
+	if (bHasBeenDestroyed || ImpactSpeed < MinimumImpactSpeed) return;
+	const float EffectiveStyle = FMath::Clamp(StyleMultiplier, 0.0f, MaximumStyleImpactMultiplier);
+	const float Damage = ((ImpactSpeed - MinimumImpactSpeed) / 1000.0f) * ImpactDamagePer1000Speed * FMath::Max(0.1f, EffectiveStyle);
+	if (Damage <= 0.0f) return;
+	OnStructuralImpact.Broadcast(ImpactCauser, ImpactSpeed, Damage);
+	TakeDamageCustom(Damage, ImpactCauser);
+}
 void ADestructibleBase::DestroyObject()
 {
 	if (bHasBeenDestroyed || Health > 0.0f) return;
 	bHasBeenDestroyed = true;
-	if (IntactMeshComponent)
-	{
-		IntactMeshComponent->SetVisibility(false);
-		IntactMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	}
-	if (bUseChaosDestruction && ChaosGeometryCollection) SpawnChunksChaos();
-	else SpawnChunksPreFractured();
+	if (IntactMeshComponent) { IntactMeshComponent->SetVisibility(false); IntactMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision); }
+	if (bUseChaosDestruction && ChaosGeometryCollection) SpawnChunksChaos(); else SpawnChunksPreFractured();
 	if (DestructionVFX) UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), DestructionVFX, GetActorLocation(), GetActorRotation());
 	if (DestructionSFX) UGameplayStatics::PlaySoundAtLocation(GetWorld(), DestructionSFX, GetActorLocation());
 	if (UWorld* World = GetWorld())
 	{
-		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
-		{
-			Director->RecordDestruction(LastDamageCauser, DestructionProfileWeight);
-		}
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>()) Director->RecordDestruction(LastDamageCauser, DestructionProfileWeight);
+		if (bPermanentArenaChange) if (UEnvironmentCombatSubsystem* Environment = World->GetSubsystem<UEnvironmentCombatSubsystem>()) Environment->RecordArenaChange(ArenaRegionId, this);
 	}
 	OnDestructibleBroken.Broadcast(LastDamageCauser, DestructionProfileWeight);
 	SpawnDataCurrency();
 	SetLifeSpan(0.5f);
 }
-
 void ADestructibleBase::SpawnChunksPreFractured()
 {
 	if (ChunkMeshes.Num() == 0 || !GetWorld()) return;
 	const FVector Center = GetActorLocation();
 	for (int32 Index = 0; Index < ChunkCount; ++Index)
 	{
-		AStaticMeshActor* Chunk = GetPooledChunk();
-		if (!Chunk) continue;
 		UStaticMesh* Mesh = ChunkMeshes[FMath::RandRange(0, ChunkMeshes.Num() - 1)];
 		if (!Mesh) continue;
+		const FVector Location = Center + FVector(FMath::FRandRange(-50.f,50.f), FMath::FRandRange(-50.f,50.f), FMath::FRandRange(-50.f,50.f));
+		const FRotator Rotation = GetActorRotation() + FRotator(FMath::FRandRange(0.f,360.f), FMath::FRandRange(0.f,360.f), FMath::FRandRange(0.f,360.f));
+		if (DebrisActorClass)
+		{
+			AActor* Spawned = GetWorld()->SpawnActor<AActor>(DebrisActorClass, Location, Rotation);
+			if (ACombatDebris* Debris = Cast<ACombatDebris>(Spawned))
+			{
+				Debris->MeshComponent->SetStaticMesh(Mesh);
+				Debris->DebrisLifetime = ChunkLifetime;
+				const FVector Direction = (Location - Center).GetSafeNormal() + FVector(0,0,DebrisUpwardBias);
+				Debris->MeshComponent->AddImpulse(Direction.GetSafeNormal() * ChunkImpulseStrength, NAME_None, true);
+			}
+			else if (Spawned) Spawned->Destroy();
+			continue;
+		}
+		AStaticMeshActor* Chunk = GetPooledChunk();
+		if (!Chunk) continue;
 		UStaticMeshComponent* Component = Chunk->GetStaticMeshComponent();
 		if (!Component) continue;
-		Component->SetStaticMesh(Mesh);
-		Component->SetSimulatePhysics(true);
-		Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		Component->SetCollisionResponseToAllChannels(ECR_Block);
-		const FVector Location = Center + FVector(FMath::FRandRange(-50.f,50.f), FMath::FRandRange(-50.f,50.f), FMath::FRandRange(-50.f,50.f));
-		Chunk->SetActorLocation(Location);
-		Chunk->SetActorRotation(GetActorRotation() + FRotator(FMath::FRandRange(0.f,360.f), FMath::FRandRange(0.f,360.f), FMath::FRandRange(0.f,360.f)));
-		FVector Impulse = (Location - Center).GetSafeNormal() * ChunkImpulseStrength;
-		Impulse += FVector(FMath::FRandRange(-100.f,100.f), FMath::FRandRange(-100.f,100.f), FMath::FRandRange(0.f,200.f));
-		Component->AddImpulse(Impulse, NAME_None, true);
+		Component->SetStaticMesh(Mesh); Component->SetSimulatePhysics(true); Component->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics); Component->SetCollisionResponseToAllChannels(ECR_Block);
+		Chunk->SetActorLocation(Location); Chunk->SetActorRotation(Rotation);
+		const FVector Direction = (Location - Center).GetSafeNormal() + FVector(0,0,DebrisUpwardBias);
+		Component->AddImpulse(Direction.GetSafeNormal() * ChunkImpulseStrength, NAME_None, true);
 		Chunk->SetActorHiddenInGame(false);
-		ActiveChunks.Add(Chunk, ChunkLifetime);
+		if (ChunkLifetime > 0.0f) ActiveChunks.Add(Chunk, ChunkLifetime);
 	}
 }
-
 void ADestructibleBase::SpawnChunksChaos()
 {
 	if (!GetWorld() || !ChaosGeometryCollection) { SpawnChunksPreFractured(); return; }
-	FActorSpawnParameters Params;
-	Params.Owner = this;
-	Params.Instigator = GetInstigator();
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	FActorSpawnParameters Params; Params.Owner = this; Params.Instigator = GetInstigator(); Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	AGeometryCollectionActor* Actor = GetWorld()->SpawnActor<AGeometryCollectionActor>(AGeometryCollectionActor::StaticClass(), GetActorLocation(), GetActorRotation(), Params);
 	if (!Actor) return;
 	UGeometryCollectionComponent* Collection = Actor->GetGeometryCollectionComponent();
 	if (!Collection) { Actor->Destroy(); return; }
-	Collection->SetRestCollection(ChaosGeometryCollection);
-	Collection->SetSimulatePhysics(true);
-	Collection->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	Collection->SetCollisionResponseToAllChannels(ECR_Block);
-	Collection->SetDamageThreshold({DamageThreshold});
-	Collection->SetEnableDamageFromCollision(bEnableClustering);
+	Collection->SetRestCollection(ChaosGeometryCollection); Collection->SetSimulatePhysics(true); Collection->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics); Collection->SetCollisionResponseToAllChannels(ECR_Block); Collection->SetDamageThreshold({DamageThreshold}); Collection->SetEnableDamageFromCollision(bEnableClustering);
 	UFieldSystemComponent* Field = NewObject<UFieldSystemComponent>(Actor);
-	if (Field)
-	{
-		Field->RegisterComponent();
-		Field->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		URadialVector* Radial = NewObject<URadialVector>(Field);
-		if (Radial)
-		{
-			Radial->Magnitude = FieldForceStrength;
-			Radial->Position = GetActorLocation();
-			Field->ApplyPhysicsField(true, EFieldPhysicsType::Field_LinearForce, nullptr, Radial);
-		}
-	}
-	Actor->SetLifeSpan(ChunkLifetime);
+	if (Field) { Field->RegisterComponent(); Field->AttachToComponent(Actor->GetRootComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale); URadialVector* Radial = NewObject<URadialVector>(Field); if (Radial) { Radial->Magnitude = FieldForceStrength; Radial->Position = GetActorLocation(); Field->ApplyPhysicsField(true, EFieldPhysicsType::Field_LinearForce, nullptr, Radial); } }
+	// Geometry-collection lifespan intentionally remains unset: permanent structural collapse lasts for the encounter.
 }
-
 void ADestructibleBase::SpawnDataCurrency()
 {
 	if (DataDropAmount <= 0 || !GetWorld()) return;
 	if (bAutoCollectData)
 	{
-		TArray<AActor*> Pawns;
-		UGameplayStatics::GetAllActorsOfClass(GetWorld(), APawn::StaticClass(), Pawns);
-		for (AActor* Actor : Pawns)
-		{
-			APawn* Pawn = Cast<APawn>(Actor);
-			if (Pawn && Pawn->IsPlayerControlled() && FVector::Dist(GetActorLocation(), Pawn->GetActorLocation()) <= AutoCollectRadius)
-			{
-				UE_LOG(LogTemp, Log, TEXT("DestructibleBase: %d data fragments available for nearby player (currency integration pending)."), DataDropAmount);
-				return;
-			}
-		}
+		TArray<AActor*> Pawns; UGameplayStatics::GetAllActorsOfClass(GetWorld(), APawn::StaticClass(), Pawns);
+		for (AActor* Actor : Pawns) { APawn* Pawn = Cast<APawn>(Actor); if (Pawn && Pawn->IsPlayerControlled() && FVector::Dist(GetActorLocation(), Pawn->GetActorLocation()) <= AutoCollectRadius) { UE_LOG(LogTemp, Log, TEXT("DestructibleBase: %d data fragments available for nearby player (currency integration pending)."), DataDropAmount); return; } }
 	}
-	else if (DataPickupClass)
-	{
-		FActorSpawnParameters Params;
-		Params.Owner = this;
-		Params.Instigator = GetInstigator();
-		GetWorld()->SpawnActor<AActor>(DataPickupClass, GetActorLocation() + FVector(0,0,50), FRotator::ZeroRotator, Params);
-	}
+	else if (DataPickupClass) { FActorSpawnParameters Params; Params.Owner = this; Params.Instigator = GetInstigator(); GetWorld()->SpawnActor<AActor>(DataPickupClass, GetActorLocation() + FVector(0,0,50), FRotator::ZeroRotator, Params); }
 }
-
 AStaticMeshActor* ADestructibleBase::GetPooledChunk()
 {
 	for (AStaticMeshActor* Chunk : ChunkPool) if (Chunk && Chunk->IsHidden()) return Chunk;
@@ -171,17 +128,9 @@ AStaticMeshActor* ADestructibleBase::GetPooledChunk()
 	if (NewChunk) { NewChunk->SetActorHiddenInGame(true); ChunkPool.Add(NewChunk); }
 	return NewChunk;
 }
-
 void ADestructibleBase::ReturnChunkToPool(AStaticMeshActor* Chunk)
 {
-	if (!Chunk) return;
-	Chunk->SetActorHiddenInGame(true);
-	if (UStaticMeshComponent* Component = Chunk->GetStaticMeshComponent())
-	{
-		Component->SetSimulatePhysics(false);
-		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Component->SetPhysicsLinearVelocity(FVector::ZeroVector);
-		Component->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
-	}
+	if (!Chunk) return; Chunk->SetActorHiddenInGame(true);
+	if (UStaticMeshComponent* Component = Chunk->GetStaticMeshComponent()) { Component->SetSimulatePhysics(false); Component->SetCollisionEnabled(ECollisionEnabled::NoCollision); Component->SetPhysicsLinearVelocity(FVector::ZeroVector); Component->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector); }
 	Chunk->SetActorLocation(FVector(0,0,-10000));
 }
